@@ -10,4 +10,4 @@ pub mod persistence;
 pub mod pty;
 
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
-pub use pty::Coalescer;
+pub use pty::{Coalescer, PtyAdapter, PtyError, PtySpawnConfig, PtyTransport};

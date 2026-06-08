@@ -12,6 +12,12 @@
 //!   the in-adapter `PtyTransport` fake seam, and the `portable-pty`-backed
 //!   `PtyAdapter`.
 
+pub mod adapter;
 pub mod coalescer;
+pub mod config;
+pub mod transport;
 
+pub use adapter::{PtyAdapter, PtyError};
 pub use coalescer::Coalescer;
+pub use config::{default_shell, PtySpawnConfig};
+pub use transport::PtyTransport;
