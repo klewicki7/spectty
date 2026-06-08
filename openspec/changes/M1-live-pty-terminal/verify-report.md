@@ -414,3 +414,111 @@ on macOS (`pnpm tauri dev`): vim/htop/`git log --oneline --graph` render+behave,
 window resize tracks PTY size (SIGWINCH), scrollback retained beyond one screen,
 copy/paste OSC52, `pty_exit` observed. That manual gate — NOT this pass — is the final
 M1 exit criterion before `sdd-archive`.
+
+---
+
+# M1 — Live PTY Terminal — Verify Report (PR5 — R3 quiescent-flush fix)
+
+> SDD verify phase, FOURTH pass. Scope: **PR5 ONLY** = the R3 quiescent-flush fix.
+> Branch `fix/m1-pty-quiescent-flush` (PR1+PR2+PR3 merged to main; base `47d6746`).
+> ONE file changed: `src-tauri/src/commands/pty.rs` (+302/-40). Verified
+> ADVERSARIALLY from source against spec(#785)/design(#786 R3)/tasks(#787) +
+> bug diagnosis(#793) + pattern(#794). Apply report(#788) re-checked, NOT trusted.
+> PR1/PR2/PR3 sections above are PRESERVED.
+
+## Overall verdict: PASS (PR5 is pushable)
+
+**0 CRITICAL, 0 WARNING, 2 SUGGESTION.** R3 (the quiescent-flush stall) is
+GENUINELY fixed and closed by a non-tautological regression test. No thread leak
+or deadlock on any path. `pty_exit` fires exactly once. Quarantine holds. All five
+gates green on a forced clean rebuild.
+
+## Gate report (each re-run from source; clippy forced clean to defeat content-hash cache)
+
+| Gate | Command | Result |
+|------|---------|--------|
+| fmt | `cargo fmt --all -- --check` | PASS (exit 0, no diff) |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS (exit 0, 0 warnings — re-confirmed after `cargo clean -p spectty && cargo clean -p spectty-adapters` forced full rebuild) |
+| test | `cargo test --workspace` | PASS — 22 tests (10 spectty + 12 adapters), 0 failed; spectty bin finished in 0.08s (real-PTY tests did NOT hang); whole suite incl. compile 9.29s wall |
+| deny | `cargo deny --manifest-path crates/core/Cargo.toml check bans` | PASS (`bans ok`, exit 0) |
+| build | `cargo build -p spectty` | PASS (exit 0) |
+
+## Fix correctness (CRITICAL focus) — R3 GENUINELY FIXED
+
+- `forward_step` (pty.rs:185-195): `Err(RecvTimeoutError::Timeout) => Continue(coalescer.drain_due(now))`. The Timeout branch DRIVES `drain_due` — this is the fix.
+- Forwarder loop (pty.rs:246) calls `rx.recv_timeout(FLUSH_INTERVAL)`, **NOT `recv()`**. So while the PTY is silent the loop wakes every `FLUSH_INTERVAL` with `Timeout` and flushes stranded bytes. A `recv()` would re-introduce the stall; it is not used.
+- `Coalescer::drain_due` (adapters/coalescer.rs): flushes when `now - last_flush >= flush_interval` AND buffer non-empty; returns `None` on empty buffer (no spurious empty chunk). Verified against source.
+- Unit test `quiescent_timeout_flushes_stranded_bytes_within_interval` (pty.rs:457-484) is NON-TAUTOLOGICAL: pushes `ESC[6n` (asserts `Continue(None)` — buffered, under size threshold), then feeds `Err(Timeout)` at `t0+FLUSH_INTERVAL` and asserts `Continue(Some(ESC[6n))`. It exercises the REAL `forward_step` + REAL `Coalescer`; it would FAIL against the old read-branch-only shape. This is the clean deterministic proof (no sleep, no PTY, no thread).
+- Real-PTY e2e `real_pty_lone_small_write_is_not_stranded_while_quiescent` (pty.rs:623-695): `printf 'Q'; exec cat` writes ONE byte then blocks on stdin (no EOF). The only way `Q` arrives is the Timeout-driven flush. **BOUNDED**: `deadline = now + 5s` (line 665); loop is `while collected.is_empty() && Instant::now() < deadline`. If the byte never arrived, the loop exits at the deadline and `assert!(output.contains(marker))` (690) FAILS — it CANNOT block CI forever. Confirmed passing in <0.1s.
+- Triangulation tests present and genuine: `disconnect_drains_all_and_signals_exit`, `oversized_data_flushes_on_size_threshold`, `quiescent_timeout_with_empty_buffer_emits_nothing` (no spurious empty chunk).
+
+## Thread lifecycle / no-leak (CRITICAL focus) — SOUND on every path
+
+Shutdown chain (`PtyState::shutdown`, pty_state.rs:49-59 — UNCHANGED):
+`stop.swap(true)` one-shot latch → `transport.kill()` (child dies → slave closed →
+master EOF) → `reader_thread.take().join()`. **Kill precedes join** — the kill is
+what unblocks a `reader.read()` blocked in the read thread. Read thread on exit:
+`drop(tx)` (pty.rs:299) → forwarder sees `Disconnected` → `drain_all` + emit
+`pty_exit` + break → `forwarder.join()` (pty.rs:300) → read thread returns →
+shutdown's join returns.
+
+Path coverage (no leak, no deadlock on ANY path):
+- **EOF** (child exits): `Ok(0)` → break → drop(tx) → forwarder Disconnected → drain+pty_exit → join. OK.
+- **UI gone / `on_output.send` fails** (pty.rs:249): forwarder breaks, still emits pty_exit (265), returns; read thread's next `tx.send` (285) errors → break → drop(tx) → join returns immediately. Read thread DOES stop when the forwarder is gone. OK.
+- **read error** (pty.rs:294): break → drop(tx) → forwarder Disconnected → drain+exit → join. OK.
+- **kill / Drop**: idempotent latch; kill→EOF→read returns→join. OK.
+- **Deadlock**: the forwarder NEVER locks the registry (owns only Coalescer + Channel + AppHandle), so it can't deadlock against a command holding the registry mutex. `kill_impl` (pty.rs:93-95) explicitly drops the guard BEFORE the join. Single JoinHandle (read owns+joins forwarder) keeps `PtyState` shutdown intact — pty_state.rs unchanged.
+- No path where the read thread blocks forever in `reader.read()` while shutdown waits on join, because kill (→EOF) precedes the join.
+
+## pty_exit semantics — EXACTLY ONCE
+
+Emitted at pty.rs:265, AFTER the forwarder loop, reached on BOTH break points
+(the `Exit` break at 258 and the send-error break at 250). The loop has exactly
+two exits, both falling through to the single `app.emit("pty_exit", ...)`. Fires
+exactly once per spawn regardless of which path ends the stream — not zero, not
+twice. Cleaner than the old in-loop emit.
+
+## Data loss / ordering — NO LOSS, IN ORDER
+
+Single mpsc (FIFO); bytes pushed to the coalescer in receive order; coalescer is a
+FIFO byte buffer. `drain_all` on Disconnected flushes the final remainder.
+`buf[..n].to_vec()` (285) preserves exact bytes. The only deliberate drop is the
+send-error break (UI already gone — nothing to deliver). No reordering.
+
+## Quarantine — HOLDS
+
+`git diff --name-only main...HEAD` = `src-tauri/src/commands/pty.rs` ONLY.
+crates/core/Cargo.toml = `serde` + `thiserror` only (no portable-pty/tokio/tauri).
+`portable-pty` present ONLY in adapters + src-tauri manifests. core / adapters /
+ui / pty_state.rs / capabilities all UNCHANGED. `cargo deny` core bans green.
+
+## rust-best-practices / clippy
+
+- No `unwrap`/`expect` in non-test code (the only `.expect(...)` are in `#[cfg(test)]`).
+- `forward_step` is pure (`&mut Coalescer, Result<Vec<u8>, RecvTimeoutError>, Instant) -> ForwardAction`) and testable — exemplary separation of decision from I/O.
+- Thread names sane (`pty-read`, `pty-forward-{id}`); spawn errors mapped to `Result` (no panic on spawn failure).
+- `buf[..n].to_vec()` (285) is a NECESSARY allocation to move bytes across the mpsc (the slice borrows the reused stack buffer; it must be owned to send). Not a redundant clone. Perf tradeoff vs the old in-place coalescer is one extra heap copy per read on the hot path — acceptable for correctness; see S-PR5-1.
+
+## Findings
+
+- **S-PR5-1 (SUGGESTION)** — Hot-path allocation: each PTY read now allocates a `Vec` (`buf[..n].to_vec()`, pty.rs:285) to cross the mpsc, vs the old in-place coalescer push. For M1's interactive workloads this is negligible; if a future high-throughput TUI (e.g. a full-screen repaint storm) shows IPC pressure, consider a pooled/reused buffer or a bounded channel of pre-sized chunks. NOT a regression that blocks PR5 — correctness over micro-opt, as the apply intended.
+- **S-PR5-2 (SUGGESTION)** — VibeLens `show_diff_explanation` was NOT invoked during apply (tool absent in that context, per #788). CLAUDE.md per-edit explanation contract unmet for PR5; run it on `git diff HEAD` before opening the PR, or record the exception. (Carry-over of PR1 S3 / PR2 S5 / PR3 S7.)
+
+## Symptom-3 (Tab autocomplete) — note for PR4 manual re-test
+
+This backend flush fix plausibly resolves Tab completion **stranding** (the shell's
+completion output is now delivered within `FLUSH_INTERVAL` instead of being held).
+BUT a residual FRONTEND issue may remain: the webview/xterm may capture the Tab
+keydown for focus navigation before it reaches the PTY (`attachCustomKeyEventHandler`
+/ `preventDefault`). If Tab STILL fails after this fix, it is a SEPARATE FE focus
+issue, not the flush. Do NOT block PR5 on it — flag for manual re-test.
+
+## Next recommended
+
+PR5 is **clean and pushable**. Open the PR (target `main`, stacked-to-main; run
+VibeLens per S-PR5-2 or record the exception). **Final M1 confirmation still
+requires PR4 manual re-test** on macOS (`pnpm tauri dev`): atuin UP-arrow no longer
+errors (DSR/CPR now flushes), prompt renders without "shift", typing echoes
+promptly, tab-completion appears, plus the original WU-7 acceptance (vim/htop/
+`git log --oneline --graph`, resize SIGWINCH, scrollback, OSC52). That manual gate
+— NOT this pass — is the final M1 exit criterion before `sdd-archive`.

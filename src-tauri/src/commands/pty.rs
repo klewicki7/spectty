@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -154,15 +155,78 @@ pub fn pty_kill(id: PtyId, registry: State<'_, PtyRegistry>) -> Result<(), Strin
     kill_impl(&registry.0, &id)
 }
 
-/// Spawn the dedicated read thread that streams coalesced PTY output over the
-/// channel and emits `pty_exit` when the stream ends.
+/// What the forwarder loop must do after one `recv_timeout` outcome.
 ///
-/// ADR-3 DELIBERATE DEVIATION from `tokio::spawn_blocking` (called out for
-/// sdd-verify): this loop lives for the PTY's ENTIRE lifetime — it blocks on
-/// `reader.read(..)` until EOF. `spawn_blocking` is for SHORT blocking tasks;
-/// parking a never-returning loop on a Tokio blocking-pool worker would pin that
-/// worker forever and eventually starve the pool. A dedicated `std::thread`
-/// (the WezTerm pattern) keeps the async runtime unblocked.
+/// Extracting the per-message decision into this pure value (computed by
+/// [`forward_step`]) is what makes the quiescent-flush fix unit-testable WITHOUT
+/// a real PTY, a thread, or a sleep: a test feeds outcomes and asserts the
+/// returned action.
+#[derive(Debug, PartialEq, Eq)]
+enum ForwardAction {
+    /// Keep looping. `Some(chunk)` is output to send over the channel now;
+    /// `None` means nothing to send this step.
+    Continue(Option<Vec<u8>>),
+    /// The read side disconnected (EOF/error): send the final remainder (if any),
+    /// emit `pty_exit`, and stop the forwarder.
+    Exit(Option<Vec<u8>>),
+}
+
+/// Pure decision for one forwarder step. Given a `recv_timeout` outcome and the
+/// current time, decide what to flush.
+///
+/// THIS is the R3 fix: a `Timeout` (the PTY went quiet) drives `drain_due`, so
+/// bytes buffered by a small write are flushed within `FLUSH_INTERVAL` even
+/// though no further read ever unblocks. The old code only called `drain_due`
+/// inside the read-return branch, stranding those bytes until the next read.
+///
+/// - `Ok(bytes)` → push (size-threshold flush on the hot path).
+/// - `Err(Timeout)` → time-flush any stranded bytes.
+/// - `Err(Disconnected)` → drain everything left and signal exit.
+fn forward_step(
+    coalescer: &mut Coalescer,
+    outcome: Result<Vec<u8>, RecvTimeoutError>,
+    now: Instant,
+) -> ForwardAction {
+    match outcome {
+        Ok(bytes) => ForwardAction::Continue(coalescer.push(&bytes, now)),
+        Err(RecvTimeoutError::Timeout) => ForwardAction::Continue(coalescer.drain_due(now)),
+        Err(RecvTimeoutError::Disconnected) => ForwardAction::Exit(coalescer.drain_all()),
+    }
+}
+
+/// Spawn the read thread (and the forwarder thread it owns) that stream coalesced
+/// PTY output over the channel and emit `pty_exit` when the stream ends.
+///
+/// ## Why two threads (the R3 fix)
+///
+/// Reading is DECOUPLED from coalescing via an `mpsc` channel so a time-flush can
+/// fire even while the PTY is silent:
+/// - The **read thread** does the blocking `reader.read(..)` and forwards each
+///   slice over the `mpsc`; on EOF/error it drops its `Sender`, which the
+///   forwarder observes as `Disconnected`.
+/// - The **forwarder thread** owns the [`Coalescer`] + the output [`Channel`] +
+///   the [`AppHandle`] and loops on `rx.recv_timeout(FLUSH_INTERVAL)`. A
+///   `Timeout` drives `drain_due`, flushing bytes a quiescent PTY would otherwise
+///   strand (an `ESC[6n` DSR query, a prompt, a tab-completion) — that is the
+///   bug PR4 caught (design risk R3).
+///
+/// ## ADR-3 DELIBERATE DEVIATION from `tokio::spawn_blocking` (called out for
+/// sdd-verify)
+///
+/// Both loops live for the PTY's ENTIRE lifetime — the read loop blocks on
+/// `reader.read(..)` until EOF and the forwarder blocks on `recv_timeout` until
+/// disconnect. `spawn_blocking` is for SHORT blocking tasks; parking a
+/// never-returning loop on a Tokio blocking-pool worker would pin that worker
+/// forever and eventually starve the pool. Dedicated `std::thread`s (the WezTerm
+/// pattern) keep the async runtime unblocked.
+///
+/// ## Lifecycle / no leak
+///
+/// The returned `JoinHandle` is the READ thread; it OWNS the forwarder's
+/// `JoinHandle` and joins it before returning, so joining the read thread (via
+/// `PtyState::shutdown`) tears down BOTH. `stop` short-circuits the read loop,
+/// and dropping the read thread's `Sender` disconnects the forwarder so it drains
+/// and exits — neither thread can leak.
 fn spawn_read_thread(
     app: AppHandle,
     id: PtyId,
@@ -170,54 +234,70 @@ fn spawn_read_thread(
     on_output: Channel<Vec<u8>>,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>, String> {
-    std::thread::Builder::new()
-        .name(format!("pty-read-{id}"))
-        .spawn(move || {
-            let mut buf = [0u8; READ_BUF];
-            let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, Instant::now());
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
+    // Forwarder thread: owns the coalescer, the output channel, and the app
+    // handle. It is the only side that flushes and emits `pty_exit`.
+    let forwarder = std::thread::Builder::new()
+        .name(format!("pty-forward-{id}"))
+        .spawn(move || {
+            let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, Instant::now());
             loop {
-                if stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                match reader.read(&mut buf) {
-                    // EOF: the child closed the PTY. Flush the remainder and stop.
-                    Ok(0) => {
-                        if let Some(chunk) = coalescer.drain_all() {
-                            let _ = on_output.send(chunk);
-                        }
-                        break;
-                    }
-                    Ok(n) => {
-                        let now = Instant::now();
-                        if let Some(chunk) = coalescer.push(&buf[..n], now) {
-                            if on_output.send(chunk).is_err() {
-                                break;
-                            }
-                        }
-                        if let Some(chunk) = coalescer.drain_due(now) {
-                            if on_output.send(chunk).is_err() {
-                                break;
-                            }
+                let outcome = rx.recv_timeout(FLUSH_INTERVAL);
+                match forward_step(&mut coalescer, outcome, Instant::now()) {
+                    ForwardAction::Continue(Some(chunk)) => {
+                        if on_output.send(chunk).is_err() {
+                            break;
                         }
                     }
-                    // A signal interrupted the read; retry rather than treating it
-                    // as a fatal error.
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    // Any other read error closes the PTY: flush and stop.
-                    Err(_) => {
-                        if let Some(chunk) = coalescer.drain_all() {
+                    ForwardAction::Continue(None) => {}
+                    ForwardAction::Exit(remainder) => {
+                        if let Some(chunk) = remainder {
                             let _ = on_output.send(chunk);
                         }
                         break;
                     }
                 }
             }
-
             // Lifecycle: tell the UI the PTY ended. Exit code is not retrievable
             // from the read side without owning the child handle, so M1 reports
             // `None`; the child is reaped via `kill`/`Drop` on the registry side.
             let _ = app.emit("pty_exit", PtyExit { id, code: None });
+        })
+        .map_err(|e| format!("failed to spawn pty forwarder thread: {e}"))?;
+
+    // Read thread: blocking reads → forward each slice over the mpsc. Owns and
+    // joins the forwarder so a single `JoinHandle` tears down both threads.
+    std::thread::Builder::new()
+        .name("pty-read".to_string())
+        .spawn(move || {
+            let mut buf = [0u8; READ_BUF];
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                match reader.read(&mut buf) {
+                    // EOF: the child closed the PTY. Dropping `tx` below
+                    // disconnects the forwarder, which drains the remainder.
+                    Ok(0) => break,
+                    Ok(n) => {
+                        // Send-error means the forwarder is gone; stop reading.
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    // A signal interrupted the read; retry rather than treating it
+                    // as a fatal error.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // Any other read error closes the PTY: stop and let the
+                    // forwarder drain on disconnect.
+                    Err(_) => break,
+                }
+            }
+            // Drop the sender so the forwarder sees `Disconnected`, drains the
+            // final bytes, and emits `pty_exit`; then join it so neither leaks.
+            drop(tx);
+            let _ = forwarder.join();
         })
         .map_err(|e| format!("failed to spawn pty read thread: {e}"))
 }
@@ -363,6 +443,106 @@ mod tests {
     ///
     /// Deterministic and CI-safe: it runs a non-interactive `printf` (Unix) /
     /// `echo` (Windows) of a fixed marker and waits for EOF, no TTY interaction.
+    /// R3 REGRESSION (the bug PR4 caught): when the PTY goes quiet, a `Timeout`
+    /// from `recv_timeout` MUST drive a time-flush so buffered-but-stranded bytes
+    /// reach the UI within `FLUSH_INTERVAL`. The old code only called `drain_due`
+    /// inside the read-return branch, so a small write followed by silence (e.g.
+    /// an `ESC[6n` DSR query, a prompt, or a tab-completion) was withheld until
+    /// the next read unblocked — breaking atuin/fancy prompts and autocomplete.
+    ///
+    /// This test drives the forwarder's pure decision step directly: first a
+    /// small chunk arrives (buffered, not yet flushed because it is under the
+    /// size threshold), then SILENCE (a `Timeout`). The `Timeout` step alone must
+    /// emit the stranded bytes — no further input required.
+    #[test]
+    fn quiescent_timeout_flushes_stranded_bytes_within_interval() {
+        let t0 = Instant::now();
+        let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, t0);
+
+        // A small write arrives (e.g. the shell emits `ESC[6n` then blocks on
+        // input). It is under MAX_CHUNK, so push buffers it without flushing.
+        let on_data = forward_step(&mut coalescer, Ok(b"\x1b[6n".to_vec()), t0);
+        assert_eq!(
+            on_data,
+            ForwardAction::Continue(None),
+            "a small write under the size threshold must buffer, not flush yet"
+        );
+
+        // Now the PTY is SILENT: recv_timeout returns Timeout. The forwarder must
+        // flush the stranded bytes because FLUSH_INTERVAL has elapsed — WITHOUT
+        // any further read. This is the fix for R3.
+        let on_timeout = forward_step(
+            &mut coalescer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            t0 + FLUSH_INTERVAL,
+        );
+        assert_eq!(
+            on_timeout,
+            ForwardAction::Continue(Some(b"\x1b[6n".to_vec())),
+            "a quiescent Timeout must flush the stranded bytes within FLUSH_INTERVAL"
+        );
+    }
+
+    /// Triangulation 1: a `Disconnected` (read thread dropped the sender on
+    /// EOF/error) must drain ALL remaining bytes and signal exit, so the final
+    /// partial output is never lost and `pty_exit` is emitted.
+    #[test]
+    fn disconnect_drains_all_and_signals_exit() {
+        let t0 = Instant::now();
+        let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, t0);
+
+        // Buffer a small tail that never reached the size/time threshold.
+        let _ = forward_step(&mut coalescer, Ok(b"bye".to_vec()), t0);
+
+        let action = forward_step(
+            &mut coalescer,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            t0,
+        );
+        assert_eq!(
+            action,
+            ForwardAction::Exit(Some(b"bye".to_vec())),
+            "disconnect must drain the remainder and signal exit"
+        );
+    }
+
+    /// Triangulation 2: a large incoming chunk that meets the size threshold must
+    /// flush immediately on the data path (not wait for a timeout), proving the
+    /// `Ok` branch still honors the size policy.
+    #[test]
+    fn oversized_data_flushes_on_size_threshold() {
+        let t0 = Instant::now();
+        let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, t0);
+
+        let big = vec![b'x'; MAX_CHUNK];
+        let action = forward_step(&mut coalescer, Ok(big.clone()), t0);
+        assert_eq!(
+            action,
+            ForwardAction::Continue(Some(big)),
+            "a chunk at the size threshold must flush immediately on the data path"
+        );
+    }
+
+    /// Triangulation 3: a `Timeout` with an EMPTY buffer must emit nothing and
+    /// keep looping — the quiescent flush must never produce a spurious empty
+    /// chunk when there is nothing stranded.
+    #[test]
+    fn quiescent_timeout_with_empty_buffer_emits_nothing() {
+        let t0 = Instant::now();
+        let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, t0);
+
+        let action = forward_step(
+            &mut coalescer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            t0 + FLUSH_INTERVAL * 10,
+        );
+        assert_eq!(
+            action,
+            ForwardAction::Continue(None),
+            "a timeout with an empty buffer must not emit a spurious chunk"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn real_pty_streams_output_and_accepts_resize_write_kill() {
@@ -430,5 +610,87 @@ mod tests {
 
         // Kill must succeed against the real child (idempotent after natural exit).
         adapter.kill().expect("real pty kill succeeds");
+    }
+
+    /// R3 END-TO-END (the quiescent stall, proven against a REAL PTY): a single
+    /// SMALL write with NO trailing burst — the child writes one short marker and
+    /// then BLOCKS on stdin (`read`) — must still be delivered through the read +
+    /// forwarder pipeline within a bounded time. Under the old code the marker
+    /// was stranded in the coalescer because the read thread blocked and the
+    /// time-flush never fired. Here we wire the real read thread to an mpsc and
+    /// drive the forwarder loop's decision on a `recv_timeout`, asserting the
+    /// lone small write surfaces via the Timeout-driven flush WITHOUT EOF.
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_lone_small_write_is_not_stranded_while_quiescent() {
+        use spectty_adapters::{PtyAdapter, PtySpawnConfig};
+        use std::sync::mpsc;
+
+        let marker = "Q"; // one byte: well under MAX_CHUNK, so only a time-flush can deliver it
+        let cfg = PtySpawnConfig {
+            program: "/bin/sh".to_string(),
+            // Print one short marker, then block on stdin so the PTY goes QUIET
+            // (no EOF, no further output) — exactly the stall condition.
+            args: vec!["-c".to_string(), format!("printf '{marker}'; exec cat")],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        };
+
+        let (mut adapter, mut reader) = PtyAdapter::spawn(&cfg).expect("real pty spawns");
+
+        // Read thread: blocking reads → forward each slice over the mpsc. Mirrors
+        // production `spawn_read_thread`. It will block in `cat` after the marker.
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let reader_handle = std::thread::spawn(move || {
+            let mut buf = [0u8; READ_BUF];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Forwarder side: drive the real decision step. Collect until the marker
+        // appears via a Timeout-driven flush (NOT via EOF — the child is alive).
+        let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, Instant::now());
+        let mut collected: Vec<u8> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while collected.is_empty() && Instant::now() < deadline {
+            let outcome = rx.recv_timeout(FLUSH_INTERVAL);
+            match forward_step(&mut coalescer, outcome, Instant::now()) {
+                ForwardAction::Continue(Some(chunk)) => collected.extend_from_slice(&chunk),
+                ForwardAction::Continue(None) => {}
+                ForwardAction::Exit(remainder) => {
+                    if let Some(chunk) = remainder {
+                        collected.extend_from_slice(&chunk);
+                    }
+                    break;
+                }
+            }
+            // Ignore a Disconnected-style break only on real disconnect; here the
+            // child stays alive in `cat`, so we rely on the Timeout flush.
+            if matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                break;
+            }
+        }
+
+        // Stop the child and join the reader so the test leaks nothing.
+        adapter.kill().expect("real pty kill succeeds");
+        let _ = reader_handle.join();
+
+        let output = String::from_utf8_lossy(&collected);
+        assert!(
+            output.contains(marker),
+            "a lone small write must reach the forwarder via the quiescent time-flush \
+             (no EOF, no further input); got: {output:?}"
+        );
     }
 }
