@@ -26,3 +26,7 @@ spectty-adapters = { path = "../crates/adapters" }
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde = { workspace = true }
+# portable-pty lives here too (not just adapters): the read-thread/Channel wiring
+# and the real-PTY integration test drive PtyAdapter against an actual pty. Core
+# stays clean — this dependency never reaches spectty-core.
+portable-pty = "0.9.0"

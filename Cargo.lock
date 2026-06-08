@@ -2903,6 +2903,7 @@ dependencies = [
 name = "spectty"
 version = "0.0.0"
 dependencies = [
+ "portable-pty",
  "serde",
  "spectty-adapters",
  "spectty-core",
