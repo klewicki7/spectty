@@ -20,4 +20,11 @@ Thumbs.db
 # Regenerable skill-registry cache (the human-readable skill-registry.md is tracked)
 .atl/.skill-registry.cache.json
 
+# VibeLens-managed MCP config — kept local-only. These invoke `npx -y vibelens-mcp`
+# (unpinned), an auto-executed supply-chain dependency we don't want every contributor
+# to inherit on clone. Each dev opts in locally; VibeLens regenerates these.
+.mcp.json
+.cursor/mcp.json
+.vscode/mcp.json
+
 # Keep lockfiles tracked (Cargo.lock, pnpm-lock.yaml) — do NOT ignore them.
