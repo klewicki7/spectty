@@ -88,7 +88,7 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 - [x] 4.2 RED: write command-layer tests against a `FakePtyTransport` (records calls): `send_input_writes_bytes_to_transport`, `pty_resize_forwards_cols_rows`, `pty_kill_invokes_transport_kill_and_removes_entry`, `send_input_unknown_id_returns_err`. `[REQ:pty-adapter/accepts-input-resize-kill → Scenario: command-layer via fake]` `[REQ:pty-bridge/lifecycle-commands]` `[unit]` (PR2)
 - [x] 4.3 GREEN: implement `src-tauri/src/commands/pty.rs` command bodies (`send_input` / `pty_resize` / `pty_kill`) delegating to free `*_impl` fns that look the transport up by id in the registry (`&mut dyn PtyTransport`); unknown id → `Err`. Errors map via `.map_err(|e| e.to_string())` (ping convention); mutex lock → `.map_err(|_| "pty registry mutex poisoned".to_string())?` (no panic at command boundary). `[REQ:pty-bridge/lifecycle-commands]` `[REQ:pty-bridge/registry-shaped-state]` `[unit]` (PR2)
 - [x] 4.4 GREEN: implement `pty_spawn` (`async`, owned types only — `cols: u16, rows: u16, cwd: Option<String>, on_output: Channel<Vec<u8>>, registry: State<'_, PtyRegistry>) -> Result<PtyId, String>`): open `PtyAdapter`, mint id (monotonic counter), insert `PtyState`, return id. `[REQ:pty-bridge/lifecycle-commands → Scenario: pty_spawn returns id]` `[unit]/[manual]` (PR2)
-- [x] 4.5 GREEN: spawn the dedicated read thread (`std::thread::Builder::new().name("pty-read-{id}")`, ADR-3 deviation from `spawn_blocking`, rationale comment carried): reused `[0u8; READ_BUF]`, `Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, Instant::now())`, `push` + `drain_due` per read → `on_output.send(chunk)`; `Ok(0)`/error → `drain_all` then break; handle `ErrorKind::Interrupted` continue. Module consts `READ_BUF`/`MAX_CHUNK`/`FLUSH_INTERVAL`. `[REQ:pty-adapter/streams-bytes-off-thread]` `[REQ:pty-adapter/coalesces-output]` `[unit]/[manual]` (PR2)
+- [x] 4.5 GREEN: spawn the dedicated read thread (`std::thread::Builder::new().name("pty-read-{id}")`, ADR-3 deviation from `spawn_blocking`, rationale comment carried): reused `[0u8; READ_BUF]`, `Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, Instant::now())`, `push` + `drain_due` per read → `on_output.send(chunk)`; `Ok(0)`/error → `drain_all` then break; handle `ErrorKind::Interrupted` continue. Module consts `READ_BUF`/`MAX_CHUNK`/`FLUSH_INTERVAL`. `[REQ:pty-adapter/streams-bytes-off-thread]` `[REQ:pty-adapter/coalesces-output]` `[unit]/[manual]` (PR2) — NOTE: PR5 (R3 fix) later split this into a read thread + an mpsc + a forwarder driven by `recv_timeout` so the time-flush fires while the PTY is quiescent.
 - [x] 4.6 GREEN: output transport = raw `Vec<u8>` over `ipc::Channel` (NO `number[]`, NO base64); `PtyExit { id, code: Option<i32> }` (`Clone, serde::Serialize`) emitted via `app.emit("pty_exit", ...)` using the v2 `Emitter` trait on thread exit. `[REQ:pty-bridge/channel-output-event-exit → Scenario: Channel vs event]` `[REQ:pty-adapter/streams-bytes-off-thread → Scenario: raw bytes]` `[unit]/[manual]` (PR2)
 - [x] 4.7 GREEN: `pty_kill` lifecycle shutdown — `PtyState::shutdown()` sets `stop` (one-shot latch, idempotent), `transport.kill()` (closes master → read EOF), `join()` the `reader_thread`, and `kill_impl` removes the registry entry; `Drop for PtyState` calls the same `shutdown()` best-effort (no leaked thread, no double-kill). `[REQ:pty-adapter/accepts-input-resize-kill]` `[unit]/[manual]` (PR2)
 - [x] 4.8 Register all four commands in `generate_handler!` and `.manage(PtyRegistry::default())` in `src-tauri/src/lib.rs`; added `pub mod pty;` to `src-tauri/src/commands/mod.rs` and `pub mod pty_state;` to `lib.rs`. `[REQ:pty-bridge/lifecycle-commands → Scenario: all four registered]` `[unit]` (PR2)
@@ -136,6 +136,11 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 > These map verbatim to the roadmap M1 exit criteria. They CANNOT be unit-tested.
 > Run the real app (`pnpm tauri dev` / built app) on macOS (gating). Windows/ConPTY
 > is best-effort and MUST NOT block.
+>
+> **ARCHIVE NOTE (2026-06-08)**: this manual acceptance was NOT re-confirmed in the running
+> app before archive. The user explicitly chose to archive M1 on the strength of the automated
+> gates + 4 adversarial sdd-verify passes + green CI, and will run the manual re-test separately.
+> Recorded as a user-deferred KNOWN-OPEN ITEM in archive-report.md — NOT silently omitted.
 
 - [ ] 7.1 `vim` opens, edits, and exits cleanly (alt-screen, cursor keys, colors). `[REQ:roadmap-exit/criterion-1]` `[REQ:terminal-ui/renders-ansi]` `[manual]`
 - [ ] 7.2 `htop` renders and refreshes without tearing/lag — validates Coalescer batching cadence. `[REQ:roadmap-exit/criterion-1]` `[manual]`
@@ -180,3 +185,8 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 - **PR3 — M1 acceptance** (`WU-7`): manual acceptance run + recorded results; effectively a verify/doc PR, ~0 code lines. Depends on PR1 + PR2 merged.
 
 Recommended chain (if user approves chaining): `stacked-to-main` if PR1a/PR1b/PR2 can each land independently; `feature-branch-chain` with a tracker if M1 must integrate as one unit before main. Orchestrator to confirm `chain_strategy` if chaining is chosen. If the user prefers a single PR, this run requires a recorded `size:exception` (~1050 lines ≫ 400).
+
+> **ACTUAL DELIVERY (archive record)**: shipped as PR1 (adapters, merged #2), PR2 (src-tauri bridge,
+> merged #3), PR3 (terminal UI, merged #4), and PR5 (R3 quiescent-flush fix, branch
+> `fix/m1-pty-quiescent-flush`, committed `b5114f9`). "PR4" was the manual-acceptance gate (no code)
+> that caught R3. WU-1..WU-6 complete; WU-7 manual acceptance user-deferred at archive.

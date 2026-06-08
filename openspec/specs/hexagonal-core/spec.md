@@ -38,3 +38,26 @@ import. `cargo-deny` in CI is the belt-and-suspenders secondary gate.
 - **Given** the compliant scaffold with no boundary violations
 - **When** the `cargo-deny` boundary/deny-list check runs in CI
 - **Then** it MUST exit 0 with no forbidden-dependency findings
+
+## Requirement: Core gains no PTY or runtime dependency as the system grows
+> Added by change `M1-live-pty-terminal` (archived 2026-06-08) as a guard delta on the
+> baseline quarantine: M1 added PTY machinery to adapters and the bridge while leaving the
+> Core untouched.
+
+As new capabilities (PTY, terminal, etc.) are added, `spectty-core` MUST NOT gain any new
+dependency. In particular it MUST NOT depend on `portable-pty`, `tokio`, `tauri`, or any
+agent/tool crate, and MUST NOT define a `PtyPort` trait or an `OutputSignal` type. Such
+crates MUST land only in `crates/adapters` and/or `src-tauri`. The Core MUST remain
+`serde` + `thiserror` only, and the core-scoped `cargo-deny` gate MUST stay green.
+
+### Scenario: Core manifest still lists no PTY or runtime crate
+- **Given** the `spectty-core` `Cargo.toml` after a capability that introduces a PTY/runtime
+- **When** its dependency list is inspected
+- **Then** it MUST NOT include `portable-pty`, `tokio`, `tauri`, or any agent/tool crate,
+  AND it MUST remain limited to `serde` + `thiserror`
+
+### Scenario: core-scoped cargo-deny stays green after the PTY capability lands
+- **Given** the PTY machinery added to adapters / src-tauri with the Core untouched
+- **When** the core-scoped `cargo-deny` boundary gate runs in CI
+- **Then** it MUST exit 0 with no forbidden-dependency findings AND `cargo build` MUST
+  succeed

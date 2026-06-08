@@ -332,6 +332,13 @@ let handle = std::thread::Builder::new()
 > `pty_kill`/`Drop` so no detached thread leaks. (`drain_due` is also nudged by a short read-timeout
 > if portable-pty's reader supports it; otherwise the time-flush rides on the next `read` return —
 > acceptable for M1, validated against `htop`.)
+>
+> **[POST-APPLY R3 CORRECTION]** The "time-flush rides on the next `read` return" note above was the
+> source of design risk R3. As shipped (PR5), reading and coalescing were DECOUPLED: a read thread
+> forwards each slice over an `mpsc`, and a forwarder thread owns the Coalescer and loops on
+> `recv_timeout(FLUSH_INTERVAL)` so `Err(Timeout)` drives `drain_due` while the PTY is silent. See
+> the archive report and obs 793/794. The bounded-quiescent-flush behavior is now a baseline
+> `pty-adapter` requirement.
 
 ---
 
@@ -347,6 +354,10 @@ let handle = std::thread::Builder::new()
 **Output path (high-freq)**: read thread → `Coalescer` → `Channel::send(Vec<u8>)` →
 `channel.onmessage(bytes: Uint8Array)` → `term.write(bytes)`. xterm 6 `write()` accepts
 `Uint8Array` directly — no string decode, no base64.
+> **[POST-APPLY R1 RESOLUTION]** A bare `Vec<u8>` over `Channel::send` actually arrives at JS
+> `onmessage` as a `number[]` (not a `Uint8Array`) — verified against tauri 2.11.2 source (obs 792).
+> The FE `decodeChannelBytes` helper normalizes `number[]`/`ArrayBuffer`/`Uint8Array` before
+> `term.write`. No base64 was needed.
 
 **Input path**: `term.onData((data: string) => sendInput(id, data))`. The TS wrapper encodes with
 `new TextEncoder().encode(data)` → `number[]`/`Uint8Array` → `invoke("send_input", { id, data })`;
@@ -475,9 +486,12 @@ specific permission then (documented contingency, not a planned change).
 ## 10. Risks / Assumptions to validate
 
 - **R1** Channel-binary `Vec<u8>` ↔ `Uint8Array` round-trip — confirm in apply; base64 fallback ready.
+  **[RESOLVED in PR3, obs 792]** arrives as `number[]`; `decodeChannelBytes` normalizes it.
 - **R2** Batching constants are placeholders; tune against `htop`/`vim` at acceptance.
 - **R3** time-flush (`drain_due`) cadence depends on `read()` return frequency; if a quiescent PTY
   withholds the final partial flush, add a short reader read-timeout or a tick thread — decided in apply.
+  **[REALIZED + FIXED in PR5, obs 793/794]** the deferral shipped, was caught at PR4 manual acceptance,
+  and was fixed by decoupling read from coalescing via `mpsc` + `recv_timeout`. Now a baseline requirement.
 - **R4** ConPTY untested in CI (macOS-first); Windows best-effort.
 - **R5** clippy `-D warnings`: `#[must_use]` on `Coalescer` returns + spawn handle, no `Vec` clone in
   the hot loop (buffer reused), justified poisoned-mutex handling.

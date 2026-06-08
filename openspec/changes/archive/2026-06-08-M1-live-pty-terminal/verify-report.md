@@ -231,6 +231,11 @@ UI requirements (terminal-ui, manual acceptance) = PR3/PR4 — `ui/` byte-identi
   not dropped), and at 8ms FLUSH_INTERVAL with interactive output this is invisible. A timed
   `recv`/`read` with a wakeup, or a separate flush timer, would bound worst-case tail latency.
   Not needed for M1; note for M2 if interactive latency is ever perceived.
+  > **[ARCHIVE NOTE]** S4 turned out to be the same root cause as R3 — it was NOT cosmetic. A
+  > quiescent PTY (small write then block on stdin) stranded DSR/CPR/prompt/tab-completion bytes,
+  > breaking atuin and interactive render. Caught at PR4 manual acceptance, fixed in PR5 (obs 793/794)
+  > by decoupling read from coalescing via mpsc + recv_timeout. S4's suggested "timed recv with a
+  > wakeup" is essentially the fix that shipped.
 - **S5 (PR2) — VibeLens `show_diff_explanation` not invoked during apply** (tool absent in that
   context, per apply report obs#788). CLAUDE.md per-edit explanation contract unmet for PR2; run
   it on `git diff HEAD` before opening the PR, or record the exception. (Carry-over of PR1 S3.)
