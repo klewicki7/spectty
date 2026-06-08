@@ -306,6 +306,20 @@ pub fn transition(current: AgentStatus, observed: Observed) -> AgentStatus {
 
 > Only cells that CHANGE the status produce a `status_changed` event (the caller diffs old vs new).
 > Terminal states (`Completed`/`Error`) are absorbing.
+>
+> ⚠️ CORRECTION (spec is authoritative): the prose table above and the §3.4 code block
+> over-reached on three cells; the implementation follows `specs/spec.md` /
+> `specs/agent-runner.md` (RFC-2119 normative), which enumerate `Completed` reachable only
+> from an ACTIVE state and `AwaitingInput` only from `Running`:
+> - `(Starting, Finished) → Starting` (NOT `Completed`) — the spec's named "An illegal jump
+>   is rejected" scenario; `Starting` cannot skip to a terminal state.
+> - `(AwaitingInput, Finished) → AwaitingInput` (NOT `Completed`) — `AwaitingInput → Completed`
+>   is not a spec-enumerated edge.
+> - `(Idle, NeedsInput) → Idle` (NOT `AwaitingInput`) — the spec lists `AwaitingInput`
+>   reachable only via `Running → AwaitingInput`.
+> `Completed` is reachable from `Running` (spec `Running → Completed`) and from `Idle` via the
+> idle-timeout of roadmap exit-criterion 5 (`Idle → Completed`). See
+> `crates/core/src/entities/agent_status.rs` `transition_covers_the_full_legal_table`.
 
 ### 3.5 `crates/core/src/ports/agent_runner.rs` (NEW — Lock 1, D7/D8)
 ```rust

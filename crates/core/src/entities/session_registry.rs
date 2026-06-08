@@ -163,6 +163,44 @@ mod tests {
     }
 
     #[test]
+    fn registry_mints_unique_ids_under_concurrent_minters() {
+        // Defends the TOCTOU/uniqueness claim under REAL contention (D13: `mint_id` is the
+        // sole minter): many threads sharing one `Arc<SessionRegistry>` hammer `mint_id`
+        // concurrently, and EVERY minted id MUST be distinct. The `&self` interior-mutex
+        // increments `next_id` atomically with respect to the read, so no two threads can
+        // observe the same counter value.
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const MINTS_PER_THREAD: usize = 250;
+
+        let registry = Arc::new(SessionRegistry::default());
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                thread::spawn(move || {
+                    (0..MINTS_PER_THREAD)
+                        .map(|_| registry.mint_id())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let mut all_ids = HashSet::new();
+        for handle in handles {
+            for id in handle.join().expect("minter thread panicked") {
+                assert!(
+                    all_ids.insert(id),
+                    "mint_id produced a duplicate under contention"
+                );
+            }
+        }
+        assert_eq!(all_ids.len(), THREADS * MINTS_PER_THREAD);
+    }
+
+    #[test]
     fn apply_observed_returns_some_only_on_change() {
         let registry = SessionRegistry::default();
         let id = registry.mint_id();
