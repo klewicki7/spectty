@@ -1,0 +1,19 @@
+[package]
+name = "spectty-mcp"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The Spectty Agent Protocol stub MCP server. It is a standalone binary the agent
+# launches as a child process over stdio — NOT part of the Tauri/Core graph (D16).
+# It depends on serde/serde_json ONLY: never on spectty-core (pulling Core into a
+# child-process binary would blur the hexagonal quarantine) and never on tauri.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "spectty-mcp"
+path = "src/main.rs"
