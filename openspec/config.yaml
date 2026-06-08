@@ -1,0 +1,82 @@
+schema: spec-driven
+initialized: 2026-06-07
+project: ai-terminal
+codename: Spectty
+
+context: |
+  Tech stack (PLANNED — not yet scaffolded; M0 will create scaffold):
+    Backend: Rust 1.89 + Tokio (async runtime), Tauri v2 (desktop shell)
+    Frontend: React 19 + Vite + xterm.js, TypeScript
+    Architecture: Hexagonal (Ports & Adapters); Core is pure Rust, no I/O
+    Persistence: engram daemon (HTTP :7437) via EngramAdapter / PersistencePort
+    Key crates: portable-pty, notify, git2, reqwest/rmcp, serde, anyhow, thiserror, tracing
+    Package manager: pnpm; Node 23; Rust 1.89
+    Commit style: Conventional Commits; No Co-Authored-By; No AI attribution
+
+testing:
+  strict_tdd: true
+  strict_tdd_caveat: |
+    Strict TDD intent is ACTIVE (marker present in agent config) but NO test runner
+    is wired yet — this is a greenfield project with no Cargo.toml or package.json.
+    Strict TDD becomes enforceable only after M0 scaffolds the workspace.
+  runners:
+    - name: cargo test
+      layer: Core unit + Adapter integration
+      command: cargo test --workspace
+      slow_tests: cargo test --workspace -- --include-ignored
+      status: PLANNED (not yet wired)
+    - name: vitest
+      layer: UI unit (React components + hooks)
+      command: pnpm test
+      status: PLANNED (not yet wired)
+    - name: playwright
+      layer: E2E
+      command: pnpm e2e
+      status: PLANNED (M3, pending tauri-driver investigation)
+  coverage:
+    available: false
+    planned_command: cargo test --workspace (no coverage threshold set yet)
+  quality_tools:
+    - tool: clippy
+      command: cargo clippy --workspace --all-targets -- -D warnings
+      status: PLANNED
+    - tool: rustfmt
+      command: cargo fmt --all
+      status: PLANNED
+    - tool: eslint
+      command: pnpm lint
+      status: PLANNED
+    - tool: prettier
+      command: pnpm format
+      status: PLANNED
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Flag open questions from stack-decisions.md that each milestone must resolve
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Domain terms MUST match glossary.md exactly
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+    - Enforce hexagonal dependency rule: Core must never import adapter crates
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Link tasks to relevant spec scenarios
+  apply:
+    - Follow existing code patterns and naming conventions
+    tdd: true
+    test_command: cargo test --workspace
+    ui_test_command: pnpm test
+    note: TDD active per strict_tdd; write failing test first, then implementation
+  verify:
+    test_command: cargo test --workspace
+    ui_test_command: pnpm test
+    build_command: cargo build --workspace
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+    - Update openspec/specs/{domain}/spec.md with merged delta specs
