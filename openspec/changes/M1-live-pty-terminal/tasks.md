@@ -39,7 +39,7 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 - [x] 1.2 Add `portable-pty = "0.9.0"` to `src-tauri/Cargo.toml`. `[REQ:hexagonal-core/core-unchanged]` `[ci]` (PR2)
 - [x] 1.3 Confirm `crates/core/Cargo.toml` is UNCHANGED (still `serde` + `thiserror` only) — the gate. `[REQ:hexagonal-core/core-unchanged]` `[ci]` (PR1)
 - [x] 1.4 Confirm `deny.toml` is UNCHANGED (portable-pty is not in the core-scoped closure). `[REQ:hexagonal-core/cargo-deny-green]` `[ci]` (PR1)
-- [ ] 1.5 Add `@xterm/xterm ^6.0.0`, `@xterm/addon-fit ^0.11.0`, `@xterm/addon-clipboard ^0.2.0` to `ui/package.json` `dependencies`; install lockfile. `[REQ:terminal-ui/xterm-mounted]` `[ci]` (PR3 — deferred)
+- [x] 1.5 Add `@xterm/xterm ^6.0.0`, `@xterm/addon-fit ^0.11.0`, `@xterm/addon-clipboard ^0.2.0` to `ui/package.json` `dependencies`; install lockfile. `[REQ:terminal-ui/xterm-mounted]` `[ci]` (PR3 — done)
 - [ ] **Gate (WU-1)**: `cargo build --workspace` succeeds; `cargo deny --manifest-path crates/core/Cargo.toml check bans` exits 0; `pnpm -C ui install` resolves the 3 scoped deps; `pnpm -C ui build` typechecks.
 
 ---
@@ -104,8 +104,8 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 **Strict TDD**: thin wrappers are exercised through the hook tests in WU-6; this WU is small and may be merged into WU-6's commit if it stays trivial — keep separate only if it grows.
 **Rollback**: revert → no ipc wrappers; hook (WU-6) not yet present.
 
-- [ ] 5.1 Create `ui/src/pty/ipc.ts` — typed wrappers `spawnPty(cols, rows, cwd, onOutput: Channel<Uint8Array>): Promise<string>`, `sendInput(id, data: Uint8Array)`, `resizePty(id, cols, rows)`, `killPty(id)`, plus a helper to build the `Channel<Uint8Array>` and bind `onmessage`. Camel/snake mapping: `onOutput` ↔ `on_output`. `[REQ:terminal-ui/xterm-mounted]` `[unit]`
-- [ ] **Gate (WU-5)**: `pnpm -C ui build` typechecks (no runtime test alone — behavior asserted in WU-6).
+- [x] 5.1 Create `ui/src/pty/ipc.ts` — typed wrappers `spawnPty(cols, rows, cwd, onOutput): Promise<string>`, `sendInput(id, data: Uint8Array)`, `resizePty(id, cols, rows)`, `killPty(id)`, `createOutputChannel(onBytes)` builder + `decodeChannelBytes(message)` (R1 number[]→Uint8Array decoder). Camel/snake mapping: `onOutput` ↔ `on_output`. `[REQ:terminal-ui/xterm-mounted]` `[unit]` (PR3 — done; +7 ipc unit tests)
+- [x] **Gate (WU-5)**: `pnpm -C ui build` typechecks; ipc wrappers + decoder covered by `tests/unit/ipc.test.ts` (7 tests green).
 
 ---
 
@@ -115,16 +115,16 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 **Strict TDD**: RED vitest first (mirror `usePingPong.test.ts`), mocking `@tauri-apps/api/core` (invoke + fake Channel), `@tauri-apps/api/event` (listen), and `vi.mock('@xterm/xterm')` (fake Terminal: open/write/onData/dispose) + fake `FitAddon`. Then implement the hook green.
 **Rollback**: revert → no Terminal pane; App returns to M0 ping view.
 
-- [ ] 6.1 RED: write `ui/tests/unit/useTerminal.test.ts` with mocks above. `[REQ:terminal-ui/xterm-mounted]` `[unit]`
-- [ ] 6.2 RED: `useTerminal_invokes_pty_spawn_on_mount` — mount invokes `pty_spawn` with a Channel + initial cols/rows. `[REQ:terminal-ui/xterm-mounted → Scenario: spawns on mount]` `[unit]`
-- [ ] 6.3 RED: `useTerminal_writes_channel_bytes_to_term` — fire fake channel message → `term.write` called with the bytes. `[REQ:terminal-ui/xterm-mounted → Scenario: Channel output written]` `[unit]`
-- [ ] 6.4 RED: `useTerminal_invokes_send_input_on_onData` — `term.onData` yields data → `send_input` invoked with it. `[REQ:terminal-ui/xterm-mounted → Scenario: keystrokes forward]` `[unit]`
-- [ ] 6.5 RED: `useTerminal_invokes_pty_resize_on_fit` — fit yields new cols/rows → `pty_resize` invoked with them. `[REQ:terminal-ui/tracks-resize-via-fit → Scenario: fit drives pty_resize]` `[unit]`
-- [ ] 6.6 RED: `useTerminal_disposes_and_kills_on_unmount` — unmount → `term.dispose()` AND `pty_kill` invoked. `[REQ:terminal-ui/xterm-mounted → Scenario: tears down on unmount]` `[unit]`
-- [ ] 6.7 GREEN: implement `ui/src/hooks/useTerminal.ts` (mirrors `usePingPong`): on mount build `XTerm({ scrollback: SCROLLBACK=5000, convertEol: false, cursorBlink: true })`, attach `FitAddon` + `ClipboardAddon`, `term.open(container)`, build Channel→`term.write`, `spawnPty` with initial fit size, `term.onData`→`sendInput`, `ResizeObserver`→`fit()`→`resizePty` (debounced), `listen("pty_exit")`. Cleanup: disconnect observer, `term.dispose()`, `killPty(id)`. React 19 named imports; NO manual `useMemo`/`useCallback`/`forwardRef`. `[REQ:terminal-ui/xterm-mounted]` `[REQ:terminal-ui/tracks-resize-via-fit]` `[REQ:terminal-ui/retains-scrollback]` `[unit]/[manual]`
-- [ ] 6.8 GREEN: implement `ui/src/components/Terminal.tsx` — `containerRef`, `useTerminal(containerRef)`, render `<div ref={containerRef} className="terminal-pane" />`; `import "@xterm/xterm/css/xterm.css";` once. `[REQ:terminal-ui/xterm-mounted]` `[unit]/[manual]`
-- [ ] 6.9 GREEN: wire `<Terminal />` into `ui/src/App.tsx` as the primary view (M0 ping left intact alongside or removed — design leaves ping intact; keep it unless it conflicts with layout). Add minimal `.terminal-pane` CSS sizing so `ResizeObserver`/`fit` has a real box. `[REQ:terminal-ui/xterm-mounted]` `[manual]`
-- [ ] **Gate (WU-6)**: `pnpm -C ui test` green (all 5+ hook assertions); `pnpm -C ui build` typechecks and bundles.
+- [x] 6.1 RED: write `ui/tests/unit/useTerminal.test.ts` with mocks above. `[REQ:terminal-ui/xterm-mounted]` `[unit]` (PR3 — done)
+- [x] 6.2 RED: spawn-on-mount — mount invokes `pty_spawn` with a Channel (`onOutput`) + initial cols/rows. `[REQ:terminal-ui/xterm-mounted → Scenario: spawns on mount]` `[unit]` (PR3)
+- [x] 6.3 RED: channel-bytes→write — fire fake channel message (`number[]`) → `term.write` called with the decoded `Uint8Array`. `[REQ:terminal-ui/xterm-mounted → Scenario: Channel output written]` `[unit]` (PR3 — proves R1 decode)
+- [x] 6.4 RED: onData→send_input — `term.onData` yields data → `send_input` invoked with id. `[REQ:terminal-ui/xterm-mounted → Scenario: keystrokes forward]` `[unit]` (PR3)
+- [x] 6.5 RED: fit→pty_resize — ResizeObserver fires → `fit()` runs → `pty_resize` invoked with `term.cols/term.rows`. `[REQ:terminal-ui/tracks-resize-via-fit → Scenario: fit drives pty_resize]` `[unit]` (PR3)
+- [x] 6.6 RED: unmount→dispose+kill — unmount → `term.dispose()` AND `pty_kill` invoked. `[REQ:terminal-ui/xterm-mounted → Scenario: tears down on unmount]` `[unit]` (PR3)
+- [x] 6.7 GREEN: implement `ui/src/hooks/useTerminal.ts` (mirrors `usePingPong`): `Terminal({ scrollback: SCROLLBACK=5000, convertEol: false, cursorBlink: true })`, `FitAddon` + `ClipboardAddon`, `term.open(container)`, `fit()`, `createOutputChannel`→`term.write`, `spawnPty` with initial fit size (async, disposed-race guard kills late-resolved id), `term.onData`→`sendInput`, `ResizeObserver`→`fit()`→`resizePty`, `listen("pty_exit")`. Cleanup: disconnect observer, dispose onData, unlisten, `term.dispose()`, `killPty(id)`. React 19 named imports; NO manual `useMemo`/`useCallback`/`forwardRef`. `[REQ:terminal-ui/xterm-mounted]` `[REQ:terminal-ui/tracks-resize-via-fit]` `[REQ:terminal-ui/retains-scrollback]` `[unit]/[manual]` (PR3)
+- [x] 6.8 GREEN: implement `ui/src/components/Terminal.tsx` — `useRef` containerRef, `useTerminal(containerRef)`, render `<div ref={containerRef} className="terminal-pane" />`; `import "@xterm/xterm/css/xterm.css";` once. `[REQ:terminal-ui/xterm-mounted]` `[unit]/[manual]` (PR3)
+- [x] 6.9 GREEN: wire `<Terminal />` into `ui/src/App.tsx` as the primary view (M0 ping REMOVED — single full-window terminal for M1; `usePingPong` hook+test deleted, ping wiring gone). Added `ui/src/styles.css` (`.app` flex column + `.terminal-pane` flex:1/min-height:0) imported in `main.tsx` so `ResizeObserver`/`fit` has a real box. `[REQ:terminal-ui/xterm-mounted]` `[manual]` (PR3)
+- [x] **Gate (WU-6)**: `pnpm -C ui test` green (12 tests: 7 ipc + 5 hook); `pnpm -C ui build` typechecks (TS strict) and bundles (xterm.css emitted).
 
 ---
 
