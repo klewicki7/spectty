@@ -8,6 +8,10 @@
 > PTY, xterm.js, AgentRunner, AgentStatus state machine, SessionRegistry, real engram
 > HTTP/polling, GitPort, and NotifierPort are DEFERRED (M1–M5 per proposal "Scope — Out").
 > Any scenario referencing those concerns is out of scope for this delta.
+>
+> ARCHIVED 2026-06-08: these ADDED capabilities were promoted into the living baseline
+> specs at `openspec/specs/{capability}/spec.md`. This delta is kept as the historical
+> record of what M0 introduced.
 
 ---
 
