@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "vibelens": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "vibelens-mcp"
+      ],
+      "_vibelensManaged": true
+    }
+  }
+}
