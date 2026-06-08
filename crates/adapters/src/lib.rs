@@ -10,6 +10,6 @@ pub mod agent;
 pub mod persistence;
 pub mod pty;
 
-pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner};
+pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSignalProducer};
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
 pub use pty::{Coalescer, PtyAdapter, PtyError, PtySpawnConfig, PtyTransport};
