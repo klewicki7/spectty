@@ -28,7 +28,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Pinned Rust 1.89.0 with the components the gates need.
       - name: Install Rust toolchain (1.89.0)
@@ -38,7 +38,7 @@ jobs:
 
       # Cache Cargo registry/index/build artifacts keyed on the lockfile.
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
@@ -51,10 +51,10 @@ jobs:
 
       # pnpm + Node 23 with built-in pnpm-store caching.
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Set up Node 23
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 23
           cache: pnpm

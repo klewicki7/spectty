@@ -28,3 +28,5 @@ Thumbs.db
 .vscode/mcp.json
 
 # Keep lockfiles tracked (Cargo.lock, pnpm-lock.yaml) — do NOT ignore them.
+# Local AI runtime state
+.atl/
