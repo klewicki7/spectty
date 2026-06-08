@@ -20,4 +20,6 @@ pub use entities::{
     CostDelta, Observed, OutputSignal, QuickAction, Session, SessionId, SessionRegistry,
     SessionSummary, Workspace, WorkspaceId,
 };
-pub use ports::{ClockPort, PersistenceError, PersistencePort, Timestamp};
+pub use ports::{
+    AgentRunner, ClockPort, LaunchContext, LaunchSpec, PersistenceError, PersistencePort, Timestamp,
+};

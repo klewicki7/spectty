@@ -6,8 +6,10 @@
 //! - [`EngramAdapter`]: a `todo!()` skeleton proving the adapter shape; real
 //!   network transport is deferred to M3.
 
+pub mod agent;
 pub mod persistence;
 pub mod pty;
 
+pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner};
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
 pub use pty::{Coalescer, PtyAdapter, PtyError, PtySpawnConfig, PtyTransport};
