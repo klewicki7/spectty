@@ -12,3 +12,10 @@ publish = false
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+# TEST-ONLY: serde_json is a dev-dependency exclusively so Core's serde round-trip
+# tests have a concrete wire format. It is NOT a runtime dependency — the library
+# itself still depends INWARD ONLY on serde + thiserror, so the hexagonal quarantine
+# holds and `cargo deny ... check bans` stays green (it bans tauri/tokio/reqwest).
+[dev-dependencies]
+serde_json = { workspace = true }
