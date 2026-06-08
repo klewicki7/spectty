@@ -1,0 +1,29 @@
+/* Global app shell styling. The terminal pane must fill the window so xterm's
+   FitAddon/ResizeObserver measure a real, non-zero box. */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: #1e1e1e;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* The xterm container. `flex: 1` gives it the remaining height; `min-height: 0`
+   lets it shrink inside the flex column so fit() reads an accurate size. */
+.terminal-pane {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: 4px;
+  box-sizing: border-box;
+}
