@@ -1,0 +1,101 @@
+name: CI
+
+# Single job on macOS. Linux is intentionally NOT used: Tauri v2 pulls native
+# webkit2gtk/wry dependencies whose macOS path is the supported target for M0
+# (see docs/engineering/getting-started.md — macOS only for now).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # sccache wrapper — PROVISIONAL (design open question Q2). Enabled for M0 to keep
+  # the first clean Tauri build under the <30min onboarding budget. Measure real
+  # speedup at verify; drop if incremental builds are already fast enough.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  ci:
+    name: build · lint · test
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pinned Rust 1.89.0 with the components the gates need.
+      - name: Install Rust toolchain (1.89.0)
+        uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+
+      # sccache: PROVISIONAL build cache (see RUSTC_WRAPPER note above).
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      # Cache Cargo registry/index/build artifacts keyed on the lockfile.
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # pnpm + Node 23 with built-in pnpm-store caching.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node 23
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23
+          cache: pnpm
+
+      # cargo-deny installed via its dedicated action for the boundary backstop.
+      - name: Install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # We invoke cargo-deny manually below (scoped to the core manifest), so
+          # tell the action only to install the binary, not run a default check.
+          command: --version
+
+      # --- Gates, in order. Any failure blocks the merge. ---
+
+      - name: Rust format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # PRIMARY boundary gate: a core→tauri/tokio/adapters edge fails to compile here.
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      # SECONDARY boundary backstop, scoped to spectty-core's dependency closure.
+      - name: cargo-deny boundary backstop
+        run: cargo deny --manifest-path crates/core/Cargo.toml check bans
+
+      - name: Install UI dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: UI tests (Vitest)
+        run: pnpm --filter ui test
+
+      - name: UI production build
+        run: pnpm --filter ui build

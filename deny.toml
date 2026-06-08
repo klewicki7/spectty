@@ -1,0 +1,65 @@
+# cargo-deny configuration — SECONDARY hexagonal boundary backstop.
+#
+# The PRIMARY quarantine gate is the Cargo dependency graph itself: spectty-core
+# declares only `serde` + `thiserror`, so any `use tauri::` / `use tokio::` /
+# `use spectty_adapters::` in core is an unresolved-import compile error before
+# tests ever run.
+#
+# This file is the belt-and-suspenders BACKSTOP. CI invokes it scoped to the core
+# crate's manifest so the ban applies ONLY to spectty-core's dependency closure
+# (src-tauri legitimately keeps tauri + tokio):
+#
+#     cargo deny --manifest-path crates/core/Cargo.toml check bans
+#
+# If spectty-core ever gains a forbidden dependency (directly or transitively),
+# this gate fails and the change cannot merge.
+
+[graph]
+# Resolve the dependency graph for the host target only. M0 ships macOS-only.
+all-features = false
+
+[bans]
+# A forbidden crate appearing in the scoped (core) dependency closure is an ERROR.
+multiple-versions = "allow"
+wildcards = "allow"
+
+# Crates that MUST NOT appear in spectty-core's dependency closure. These are the
+# outward/infrastructure dependencies the hexagonal core is quarantined from:
+#   - tauri   : the GUI/bridge framework (belongs to src-tauri only)
+#   - tokio   : async runtime (core is pure sync by design — D2)
+#   - reqwest : HTTP client (engram transport arrives in M3, in the adapter layer)
+# The engram client crate is added here in M3 once it exists.
+deny = [
+    { name = "tauri" },
+    { name = "tokio" },
+    { name = "reqwest" },
+]
+
+[licenses]
+# License auditing is out of scope for the M0 boundary backstop. The `check bans`
+# subcommand is what CI runs; this permissive block keeps `check licenses` from
+# failing the scaffold if someone runs the full `cargo deny check`.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "Unlicense",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[advisories]
+# Advisory DB checks are not part of the M0 boundary gate; keep defaults non-fatal
+# so the scaffold's `check bans` invocation stays focused on the quarantine.
+version = 2
+yanked = "warn"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
