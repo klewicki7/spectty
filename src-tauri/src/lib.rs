@@ -8,8 +8,10 @@
 
 pub mod commands;
 pub mod pty_state;
+pub mod session_runtime;
 
 use pty_state::PtyRegistry;
+use spectty_core::SessionRegistry;
 
 /// Build and run the Tauri application.
 ///
@@ -20,6 +22,11 @@ use pty_state::PtyRegistry;
 pub fn run() {
     tauri::Builder::default()
         .manage(PtyRegistry::default())
+        // The Core `SessionRegistry` is the SOLE id minter (D13): `pty_spawn` mints
+        // through it so the OS-handle `PtyRegistry` and the Core aggregate registry
+        // share one id space in lockstep. The session commands + the rest of the M2
+        // wiring (`AgentRunnerRegistry`/`ProvisioningPort`/`ClockPort`) land in PR5b.
+        .manage(SessionRegistry::default())
         .invoke_handler(tauri::generate_handler![
             commands::ping::ping,
             commands::pty::pty_spawn,

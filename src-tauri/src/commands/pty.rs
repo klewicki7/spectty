@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use spectty_adapters::{Coalescer, PtyAdapter, PtySpawnConfig};
+use spectty_core::SessionRegistry;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
@@ -107,13 +108,17 @@ pub async fn pty_spawn(
     cwd: Option<String>,
     on_output: Channel<Vec<u8>>,
     registry: State<'_, PtyRegistry>,
+    sessions: State<'_, SessionRegistry>,
 ) -> Result<PtyId, String> {
     let cfg = PtySpawnConfig::shell(cols, rows, cwd, |k| std::env::var(k).ok());
     let (adapter, reader) = PtyAdapter::spawn(&cfg).map_err(|e| e.to_string())?;
 
-    // Mint an id. A monotonic counter rendered as a string is enough for M1's
-    // single session; M2's SessionRegistry will own real id minting.
-    let id: PtyId = next_pty_id();
+    // Mint the id through the Core `SessionRegistry` — the SOLE id minter (D13).
+    // `next_pty_id` is RETIRED: the `PtyId` IS a `SessionId`, so the OS-handle
+    // `PtyRegistry` and the Core aggregate registry key off the same string in
+    // lockstep, with no cross-map. The string newtype is unwrapped here because
+    // `PtyRegistry` (OS handles only) is keyed by the raw `String`.
+    let id: PtyId = sessions.mint_id().0;
 
     let stop = Arc::new(AtomicBool::new(false));
     let reader_thread = spawn_read_thread(app, id.clone(), reader, on_output, Arc::clone(&stop))?;
@@ -300,13 +305,6 @@ fn spawn_read_thread(
             let _ = forwarder.join();
         })
         .map_err(|e| format!("failed to spawn pty read thread: {e}"))
-}
-
-/// Mint a process-unique PTY id. Monotonic counter rendered as a decimal string.
-fn next_pty_id() -> PtyId {
-    use std::sync::atomic::AtomicU64;
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
 }
 
 #[cfg(test)]
