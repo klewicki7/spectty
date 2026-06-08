@@ -1,17 +1,25 @@
 //! The PURE `String -> String` JSON managed-namespace editor (D17, R7).
 //!
 //! Spectty registers its MCP tools by editing the agent's config JSON in place.
-//! The HEADLINE invariant (R7): the editor owns ONLY the managed `spectty_*` key
+//! The HEADLINE invariant (R7): the editor owns ONLY the managed `spectty` key
 //! under `mcpServers` — every FOREIGN key (other users' MCP servers, gentle-ai
-//! entries, unrelated top-level keys, ordering) round-trips UNTOUCHED. An
-//! inject-then-retract leaves the document byte-identical to the original (modulo
-//! `serde_json`'s stable pretty formatting, which fixtures match).
+//! entries, unrelated top-level keys) round-trips with its VALUE and (with
+//! `serde_json`'s `preserve_order` feature, enabled for this crate) its relative
+//! ORDER intact. Inject only ADDS the managed key; retract only REMOVES it.
+//!
+//! What this is NOT: byte-identity. `~/.claude.json` is machine-managed JSON, so
+//! the contract is VALUE + ORDER preservation, not text preservation. We parse to
+//! [`serde_json::Value`] and re-serialize with the standard pretty formatter, which
+//! NORMALIZES whitespace/indentation and re-renders inline objects across lines.
+//! A hand-formatted input therefore comes back reflowed (canonical 2-space pretty)
+//! even though every foreign key/value/order survives. True byte-identity would
+//! require a structural text editor that mutates the document in place; the design
+//! (D17) deliberately rejected that — text markers corrupt `~/.claude.json` (one
+//! big nested JSON doc) and `claude mcp add` is neither atomic nor testable.
 //!
 //! These functions are PURE: they take the current file text + the desired entry
 //! and return the new text. No I/O — the impure shell is the [`ConfigFile`](super::file_io::ConfigFile)
-//! seam. We parse with [`serde_json::Value`] (structural editing) rather than text
-//! markers, which would corrupt `~/.claude.json` (one big nested JSON doc), and we
-//! never shell out to `claude mcp add` (not atomic, not testable).
+//! seam.
 
 use serde_json::{Map, Value};
 use spectty_core::ProvisioningError;
@@ -20,7 +28,8 @@ use spectty_core::ProvisioningError;
 ///
 /// Serializes to `{ "command": "...", "args": [...], "env": { ... } }` — the exact
 /// Claude Code MCP stdio entry shape. `env` is a sorted `Vec<(String, String)>`
-/// (deterministic serialization for byte-stable round-trip tests).
+/// so the managed entry serializes deterministically (the same input always yields
+/// the same `spectty` sub-object).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerEntry {
     /// The command to launch the MCP server (the `spectty-mcp` binary path).
@@ -103,8 +112,10 @@ fn parse_root_object(current_json: &str) -> Result<Map<String, Value>, Provision
     }
 }
 
-/// Serialize with `serde_json`'s stable pretty formatter so round-trips are
-/// byte-stable across inject/retract.
+/// Serialize with `serde_json`'s pretty formatter. With the crate's `preserve_order`
+/// feature this keeps foreign keys in their original ORDER; whitespace/indentation
+/// is still NORMALIZED to canonical 2-space pretty (not byte-identical to arbitrary
+/// hand-formatted input — see the module docs).
 fn serialize_pretty(value: &Value) -> Result<String, ProvisioningError> {
     serde_json::to_string_pretty(value).map_err(|e| ProvisioningError::Parse(e.to_string()))
 }
@@ -123,8 +134,10 @@ mod tests {
     }
 
     /// A config carrying a foreign user MCP server AND a foreign gentle-ai entry,
-    /// pre-formatted to `serde_json` pretty so round-trip is byte-comparable.
-    fn config_with_foreign_keys() -> String {
+    /// already in the editor's CANONICAL pretty form (built via `to_string_pretty`).
+    /// Used only by the round-trip-STABILITY test below — NOT a fixture for proving
+    /// foreign-key preservation on arbitrary input.
+    fn config_in_canonical_form() -> String {
         serde_json::to_string_pretty(&serde_json::json!({
             "numStartups": 7,
             "mcpServers": {
@@ -135,36 +148,117 @@ mod tests {
         .expect("fixture serializes")
     }
 
+    /// A HAND-FORMATTED config (NOT built via `to_string_pretty`): deliberately
+    /// non-alphabetical top-level key order, 4-space indent, and inline objects.
+    /// This is the realistic shape of a user's `~/.claude.json` and is what exposes
+    /// reordering bugs.
+    fn hand_formatted_config() -> &'static str {
+        r#"{
+    "theme": "dark",
+    "numStartups": 7,
+    "projects": {
+        "/home/u/repo": { "lastUsed": "yesterday" }
+    },
+    "mcpServers": {
+        "user-tool": { "command": "user", "args": [], "env": {} },
+        "gentle-ai": { "command": "gentle", "args": ["x"], "env": { "K": "V" } }
+    }
+}"#
+    }
+
+    /// The order in which `keys` first APPEAR in the raw `json` TEXT. This reads the
+    /// serialized string directly — NOT re-parsed `Value`s — so it actually detects
+    /// reordering. (Re-parsing both sides would hide an alphabetical re-sort: a
+    /// `BTreeMap`-backed `Value` sorts BOTH sides identically, making a naive
+    /// parse-and-compare tautological — the exact flaw of the old headline test.)
+    fn text_key_order(json: &str, keys: &[&str]) -> Vec<String> {
+        let mut found: Vec<(usize, String)> = keys
+            .iter()
+            .filter_map(|k| {
+                let needle = format!("\"{k}\"");
+                json.find(&needle).map(|pos| (pos, (*k).to_string()))
+            })
+            .collect();
+        found.sort_by_key(|(pos, _)| *pos);
+        found.into_iter().map(|(_, k)| k).collect()
+    }
+
+    /// THE HONEST R7 TEST. Starts from genuinely HAND-FORMATTED input (see
+    /// [`hand_formatted_config`]) and asserts that inject→retract preserves every
+    /// foreign key's VALUE and (with `preserve_order`) its relative ORDER, and that
+    /// no `spectty` key is left behind. It does NOT assert byte-identity — the
+    /// document is reflowed by the pretty serializer, which is the documented
+    /// contract.
     #[test]
-    fn inject_then_retract_round_trips_foreign_keys_byte_identical() {
-        let original = config_with_foreign_keys();
+    fn inject_then_retract_preserves_hand_formatted_foreign_values() {
+        let original = hand_formatted_config();
+        let original_value: Value = serde_json::from_str(original).expect("valid input");
+
+        let injected = inject_spectty_mcp(original, "spectty", &entry()).expect("inject ok");
+        let retracted = retract_spectty_mcp(&injected, "spectty").expect("retract ok");
+        let retracted_value: Value = serde_json::from_str(&retracted).expect("valid output");
+
+        // No managed key survives retract.
+        assert!(
+            retracted_value.get("spectty").is_none()
+                && retracted_value["mcpServers"].get("spectty").is_none(),
+            "no spectty key remains after retract"
+        );
+
+        // Every foreign top-level key keeps its VALUE.
+        for key in ["theme", "numStartups", "projects"] {
+            assert_eq!(
+                retracted_value[key], original_value[key],
+                "foreign top-level value preserved: {key}"
+            );
+        }
+
+        // Every foreign mcpServers entry keeps its VALUE.
+        for key in ["user-tool", "gentle-ai"] {
+            assert_eq!(
+                retracted_value["mcpServers"][key], original_value["mcpServers"][key],
+                "foreign mcpServers value preserved: {key}"
+            );
+        }
+
+        // With preserve_order, foreign keys keep their original relative ORDER.
+        // Asserted against the RAW serialized TEXT (not re-parsed Values) so an
+        // alphabetical re-sort is actually caught.
+        let top = ["theme", "numStartups", "projects", "mcpServers"];
+        assert_eq!(
+            text_key_order(&retracted, &top),
+            text_key_order(original, &top),
+            "top-level key TEXT order unchanged after inject→retract"
+        );
+        let mcp = ["user-tool", "gentle-ai"];
+        assert_eq!(
+            text_key_order(&retracted, &mcp),
+            text_key_order(original, &mcp),
+            "mcpServers key TEXT order unchanged after inject→retract"
+        );
+    }
+
+    /// Round-trip STABILITY of already-canonical input. This proves that feeding the
+    /// editor its OWN canonical output back through inject→retract is byte-identical
+    /// — it does NOT prove preservation of arbitrary hand-formatted input (that is
+    /// [`inject_then_retract_preserves_hand_formatted_foreign_values`]).
+    #[test]
+    fn inject_then_retract_is_stable_on_already_canonical_input() {
+        let original = config_in_canonical_form();
 
         let injected = inject_spectty_mcp(&original, "spectty", &entry()).expect("inject ok");
-        // foreign keys + unrelated top-level key survive the inject
-        assert!(
-            injected.contains("user-tool"),
-            "foreign user entry preserved"
-        );
-        assert!(
-            injected.contains("gentle-ai"),
-            "foreign gentle-ai entry preserved"
-        );
-        assert!(
-            injected.contains("numStartups"),
-            "unrelated top-level key preserved"
-        );
         assert!(injected.contains("spectty"), "managed key added");
 
         let retracted = retract_spectty_mcp(&injected, "spectty").expect("retract ok");
         assert_eq!(
             retracted, original,
-            "inject→retract is byte-identical to the original (R7 headline)"
+            "canonical input round-trips byte-identical (stability, not arbitrary-input preservation)"
         );
     }
 
     #[test]
     fn retract_removes_only_spectty_keys() {
-        let original = config_with_foreign_keys();
+        let original = config_in_canonical_form();
         let injected = inject_spectty_mcp(&original, "spectty", &entry()).expect("inject");
 
         let retracted = retract_spectty_mcp(&injected, "spectty").expect("retract");
@@ -179,7 +273,7 @@ mod tests {
 
     #[test]
     fn inject_is_idempotent() {
-        let original = config_with_foreign_keys();
+        let original = config_in_canonical_form();
         let once = inject_spectty_mcp(&original, "spectty", &entry()).expect("inject 1");
         let twice = inject_spectty_mcp(&once, "spectty", &entry()).expect("inject 2");
         assert_eq!(once, twice, "double inject == single inject");
@@ -213,7 +307,7 @@ mod tests {
 
     #[test]
     fn retract_when_absent_is_a_noop() {
-        let original = config_with_foreign_keys();
+        let original = config_in_canonical_form();
         let retracted = retract_spectty_mcp(&original, "spectty").expect("retract absent");
         assert_eq!(
             retracted, original,
@@ -225,5 +319,19 @@ mod tests {
     fn invalid_json_is_a_parse_error_not_a_panic() {
         let err = inject_spectty_mcp("{not json", "spectty", &entry()).expect_err("must error");
         assert!(matches!(err, ProvisioningError::Parse(_)));
+    }
+
+    /// A pre-existing `mcpServers` of the WRONG shape (here a JSON array) must be a
+    /// [`ProvisioningError::Parse`], NOT silently overwritten — we never destroy a
+    /// foreign value, even a malformed one. Surfacing the error lets the caller
+    /// decide; clobbering it would be data loss.
+    #[test]
+    fn non_object_mcp_servers_is_a_parse_error_not_data_loss() {
+        let config = r#"{ "mcpServers": [] }"#;
+        let err = inject_spectty_mcp(config, "spectty", &entry()).expect_err("must error");
+        assert!(
+            matches!(err, ProvisioningError::Parse(_)),
+            "non-object mcpServers surfaces a Parse error instead of clobbering it"
+        );
     }
 }
