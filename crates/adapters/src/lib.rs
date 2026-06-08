@@ -8,8 +8,13 @@
 
 pub mod agent;
 pub mod persistence;
+pub mod provision;
 pub mod pty;
 
 pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSignalProducer};
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
+pub use provision::{
+    inject_spectty_mcp, is_git_tracked, retract_spectty_mcp, ClaudeJsonProvisioner, ConfigFile,
+    McpServerEntry, RealConfigFile,
+};
 pub use pty::{Coalescer, PtyAdapter, PtyError, PtySpawnConfig, PtyTransport};
