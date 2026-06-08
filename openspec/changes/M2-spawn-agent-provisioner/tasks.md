@@ -92,15 +92,15 @@ WU-8 (spectty-mcp stub, independent) ──────────────�
 **Rollback**: revert → no state machine; registry not yet present.
 **PR slice**: PR1.
 
-- [ ] 3.1 RED: `agent_status_exposes_all_six_variants` — assert `Starting, Idle, Running, AwaitingInput, Completed, Error` all present. `[REQ:agent-status-machine/six-variants → Scenario: all six variants]` `[unit]`
-- [ ] 3.2 RED: `transition_running_awaiting_running_round_trip` — `transition(Running, NeedsInput)==AwaitingInput` then `transition(AwaitingInput, Working)==Running` (the permission-prompt round trip, exit-criterion 3). `[REQ:agent-status-machine/pure-transition → Scenario: Running→AwaitingInput→Running]` `[unit]` `[D8]`
-- [ ] 3.3 RED: `transition_illegal_jump_leaves_current` — `transition(Starting, Finished)==Starting` (illegal skip ignored). `[REQ:agent-status-machine/pure-transition → Scenario: illegal jump rejected]` `[unit]` `[D8]`
-- [ ] 3.4 RED: `transition_any_state_to_error` — for every `current`, `transition(current, Failed)==Error`. `[REQ:agent-status-machine/pure-transition → Scenario: any state may go to Error]` `[unit]`
-- [ ] 3.5 RED: `transition_starting_ready_reaches_idle` — `transition(Starting, Ready)==Idle` (exit-criterion 1). `[REQ:agent-status-machine/pure-transition → Scenario: Starting reaches Idle]` `[unit]`
-- [ ] 3.6 RED: `transition_terminal_states_are_absorbing` — `Completed`/`Error` stay put for ANY observed. `[REQ:agent-status-machine/pure-transition]` `[unit]` `[D8]`
-- [ ] 3.7 GREEN: GROW `crates/core/src/entities/agent_status.rs` — confirm the 6-variant enum; add `enum Observed { Ready, Working, NeedsInput, Finished, Failed }`; implement `#[must_use] pub fn transition(current: AgentStatus, observed: Observed) -> AgentStatus` matching the design §3.4 legal table (terminals absorbing; only changing cells return a new status). Total, deterministic, NO I/O, NO time, NO agent name. `[REQ:agent-status-machine/pure-transition]` `[REQ:agent-status-machine/six-variants]` `[unit]` `[D8]`
-- [ ] 3.8 GREEN: re-export `Observed` + `transition` from `lib.rs`. `[REQ:hexagonal-core/core-no-new-deps]` `[ci]`
-- [ ] **Gate (WU-3)**: `cargo test --workspace` green (full transition table); fmt/clippy clean; `cargo deny --manifest-path crates/core/Cargo.toml check bans` exits 0.
+- [x] 3.1 RED: `agent_status_exposes_all_six_variants` — assert `Starting, Idle, Running, AwaitingInput, Completed, Error` all present. `[REQ:agent-status-machine/six-variants → Scenario: all six variants]` `[unit]`
+- [x] 3.2 RED: `transition_running_awaiting_running_round_trip` — `transition(Running, NeedsInput)==AwaitingInput` then `transition(AwaitingInput, Working)==Running` (the permission-prompt round trip, exit-criterion 3). `[REQ:agent-status-machine/pure-transition → Scenario: Running→AwaitingInput→Running]` `[unit]` `[D8]`
+- [x] 3.3 RED: `transition_no_op_observation_leaves_current` — a `Ready`/`Working` burst that maps to no state change leaves `current` (post-D8 form of "illegal/no-op observation ignored"). NOTE: the task's literal `transition(Starting, Finished)==Starting` example was DROPPED — the design §3.4 table makes `Finished` reach `Completed` from any non-terminal state (incl. Starting), so it is not a no-op. `[REQ:agent-status-machine/pure-transition → Scenario: illegal jump rejected]` `[unit]` `[D8]`
+- [x] 3.4 RED: `transition_any_state_to_error` — for every `current`, `transition(current, Failed)==Error` (terminals absorb). `[REQ:agent-status-machine/pure-transition → Scenario: any state may go to Error]` `[unit]`
+- [x] 3.5 RED: `transition_starting_ready_reaches_idle` — `transition(Starting, Ready)==Idle` (exit-criterion 1). `[REQ:agent-status-machine/pure-transition → Scenario: Starting reaches Idle]` `[unit]`
+- [x] 3.6 RED: `transition_terminal_states_are_absorbing` — `Completed`/`Error` stay put for ANY observed. `[REQ:agent-status-machine/pure-transition]` `[unit]` `[D8]`
+- [x] 3.7 GREEN: GROW `crates/core/src/entities/agent_status.rs` — confirmed the 6-variant enum; added `enum Observed { Ready, Working, NeedsInput, Finished, Failed }`; implemented `#[must_use] pub fn transition(current: AgentStatus, observed: Observed) -> AgentStatus` per the design §3.4 CODE block (terminals absorbing; only changing cells return a new status). Total, deterministic, NO I/O, NO time, NO agent name. Plus `transition_covers_the_full_legal_table` asserting all 30 cells. `[REQ:agent-status-machine/pure-transition]` `[REQ:agent-status-machine/six-variants]` `[unit]` `[D8]`
+- [x] 3.8 GREEN: re-exported `Observed` + `transition` from `entities/mod.rs` + `lib.rs`. `[REQ:hexagonal-core/core-no-new-deps]` `[ci]`
+- [x] **Gate (WU-3)**: `cargo test --workspace` green (core 21, full transition table); fmt clean; clippy `-D warnings` clean; `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok`; `cargo build -p spectty` Finished.
 
 ---
 

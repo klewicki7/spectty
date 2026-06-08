@@ -16,7 +16,7 @@ pub mod entities;
 pub mod ports;
 
 pub use entities::{
-    AgentCapabilities, AgentDescriptor, AgentKind, AgentSpec, AgentStatus, AgentTier, CostDelta,
-    OutputSignal, QuickAction, Session, SessionId, Workspace, WorkspaceId,
+    transition, AgentCapabilities, AgentDescriptor, AgentKind, AgentSpec, AgentStatus, AgentTier,
+    CostDelta, Observed, OutputSignal, QuickAction, Session, SessionId, Workspace, WorkspaceId,
 };
 pub use ports::{ClockPort, PersistenceError, PersistencePort, Timestamp};
