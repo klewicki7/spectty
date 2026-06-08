@@ -64,13 +64,14 @@ jobs:
           node-version: 23
           cache: pnpm
 
-      # cargo-deny installed via its dedicated action for the boundary backstop.
+      # cargo-deny binary for the boundary backstop. NOTE: EmbarkStudios/cargo-deny-action
+      # is a Docker container action (Linux-only) and cannot run on this macOS runner —
+      # we install the prebuilt binary via taiki-e/install-action (composite, cross-platform)
+      # and invoke `cargo deny` manually below, scoped to the core manifest.
       - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: taiki-e/install-action@v2
         with:
-          # We invoke cargo-deny manually below (scoped to the core manifest), so
-          # tell the action only to install the binary, not run a default check.
-          command: --version
+          tool: cargo-deny
 
       # --- Gates, in order. Any failure blocks the merge. ---
 
