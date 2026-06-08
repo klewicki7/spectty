@@ -15,9 +15,11 @@
 
 pub mod claude_code;
 pub mod generic;
+pub mod output_signal;
 
 pub use claude_code::ClaudeCodeRunner;
 pub use generic::GenericRunner;
+pub use output_signal::OutputSignalProducer;
 
 use std::collections::HashMap;
 
