@@ -1,0 +1,2 @@
+# Project-wide clippy configuration.
+# Lint levels (e.g. -D warnings) are enforced via CI flags (WU9), not here.

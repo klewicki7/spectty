@@ -1,0 +1,97 @@
+name: CI
+
+# Single job on macOS. Linux is intentionally NOT used: Tauri v2 pulls native
+# webkit2gtk/wry dependencies whose macOS path is the supported target for M0
+# (see docs/engineering/getting-started.md — macOS only for now).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # NOTE: sccache (RUSTC_WRAPPER) was REMOVED. As a global wrapper it made every cargo
+  # invocation depend on the GitHub Actions Cache service; that service returned HTTP 400
+  # and took down the whole run — the single-point-of-failure the M0 verify flagged as W2.
+  # `actions/cache` below already provides incremental builds; sccache is not worth the SPOF.
+
+jobs:
+  ci:
+    name: build · lint · test
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pinned Rust 1.89.0 with the components the gates need.
+      - name: Install Rust toolchain (1.89.0)
+        uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+
+      # Cache Cargo registry/index/build artifacts keyed on the lockfile.
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # pnpm + Node 23 with built-in pnpm-store caching.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node 23
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23
+          cache: pnpm
+
+      # cargo-deny binary for the boundary backstop. NOTE: EmbarkStudios/cargo-deny-action
+      # is a Docker container action (Linux-only) and cannot run on this macOS runner —
+      # we install the prebuilt binary via taiki-e/install-action (composite, cross-platform)
+      # and invoke `cargo deny` manually below, scoped to the core manifest.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # --- Gates, in order. Any failure blocks the merge. ---
+
+      - name: Rust format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # PRIMARY boundary gate: a core→tauri/tokio/adapters edge fails to compile here.
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      # SECONDARY boundary backstop, scoped to spectty-core's dependency closure.
+      - name: cargo-deny boundary backstop
+        run: cargo deny --manifest-path crates/core/Cargo.toml check bans
+
+      - name: Install UI dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: UI tests (Vitest)
+        run: pnpm --filter ui test
+
+      - name: UI production build
+        run: pnpm --filter ui build

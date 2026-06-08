@@ -1,0 +1,28 @@
+[package]
+name = "spectty"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The src-tauri bridge is the ONLY crate allowed to depend on tauri. It wires the
+# technology-agnostic core (spectty-core) and its adapters (spectty-adapters) to
+# the Tauri runtime. The hexagonal boundary lives upstream: core/adapters never
+# see this dependency surface.
+
+[lib]
+# Tauri v2 splits the entrypoint into a library (app logic, mobile-shareable) and
+# a thin binary. `name` must be a valid identifier, hence the underscore.
+name = "spectty_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+spectty-core = { workspace = true }
+spectty-adapters = { path = "../crates/adapters" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { workspace = true }
