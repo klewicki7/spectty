@@ -35,11 +35,11 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 **Depends on**: nothing. **Blocks**: WU-2, WU-3, WU-4 (Rust build); WU-5, WU-6 (UI build).
 **Rollback**: revert this commit → no PTY deps; M0 still builds.
 
-- [ ] 1.1 Add `portable-pty = "0.9.0"` to `crates/adapters/Cargo.toml`. `[REQ:hexagonal-core/core-unchanged]` `[ci]`
-- [ ] 1.2 Add `portable-pty = "0.9.0"` to `src-tauri/Cargo.toml`. `[REQ:hexagonal-core/core-unchanged]` `[ci]`
-- [ ] 1.3 Confirm `crates/core/Cargo.toml` is UNCHANGED (still `serde` + `thiserror` only) — the gate. `[REQ:hexagonal-core/core-unchanged]` `[ci]`
-- [ ] 1.4 Confirm `deny.toml` is UNCHANGED (portable-pty is not in the core-scoped closure). `[REQ:hexagonal-core/cargo-deny-green]` `[ci]`
-- [ ] 1.5 Add `@xterm/xterm ^6.0.0`, `@xterm/addon-fit ^0.11.0`, `@xterm/addon-clipboard ^0.2.0` to `ui/package.json` `dependencies`; install lockfile. `[REQ:terminal-ui/xterm-mounted]` `[ci]`
+- [x] 1.1 Add `portable-pty = "0.9.0"` to `crates/adapters/Cargo.toml`. `[REQ:hexagonal-core/core-unchanged]` `[ci]` (PR1)
+- [ ] 1.2 Add `portable-pty = "0.9.0"` to `src-tauri/Cargo.toml`. `[REQ:hexagonal-core/core-unchanged]` `[ci]` (PR2/WU-4 — deferred)
+- [x] 1.3 Confirm `crates/core/Cargo.toml` is UNCHANGED (still `serde` + `thiserror` only) — the gate. `[REQ:hexagonal-core/core-unchanged]` `[ci]` (PR1)
+- [x] 1.4 Confirm `deny.toml` is UNCHANGED (portable-pty is not in the core-scoped closure). `[REQ:hexagonal-core/cargo-deny-green]` `[ci]` (PR1)
+- [ ] 1.5 Add `@xterm/xterm ^6.0.0`, `@xterm/addon-fit ^0.11.0`, `@xterm/addon-clipboard ^0.2.0` to `ui/package.json` `dependencies`; install lockfile. `[REQ:terminal-ui/xterm-mounted]` `[ci]` (PR3 — deferred)
 - [ ] **Gate (WU-1)**: `cargo build --workspace` succeeds; `cargo deny --manifest-path crates/core/Cargo.toml check bans` exits 0; `pnpm -C ui install` resolves the 3 scoped deps; `pnpm -C ui build` typechecks.
 
 ---
@@ -50,14 +50,14 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 **Strict TDD**: RED tests first (all 5), then implement `Coalescer` until green, then refactor for hot-loop discipline.
 **Rollback**: revert → no coalescer; adapter pty module not yet wired (WU-3 independent).
 
-- [ ] 2.1 Create `crates/adapters/src/pty/mod.rs` (module skeleton, doc comment) and add `pub mod pty;` to `crates/adapters/src/lib.rs`. `[REQ:pty-adapter/coalesces-output]` `[unit]`
-- [ ] 2.2 RED: write `coalescer_flushes_when_size_threshold_reached` — `push` of `max_chunk + k` bytes returns a chunk of exactly `max_chunk`, remainder buffered. `[REQ:pty-adapter/coalesces-output → Scenario: size threshold]` `[unit]`
-- [ ] 2.3 RED: write `coalescer_splits_oversized_push_at_max_chunk` — push ≫ `max_chunk` returns an exact `max_chunk` chunk, rest kept buffered. `[REQ:pty-adapter/coalesces-output → Scenario: size threshold (max-chunk split)]` `[unit]`
-- [ ] 2.4 RED: write `coalescer_does_not_flush_below_size_and_time` — small `push` under interval and under size → `None`. `[REQ:pty-adapter/coalesces-output → Scenario: empty/below-threshold no flush]` `[unit]`
-- [ ] 2.5 RED: write `coalescer_drain_due_flushes_after_interval` — inject `now = last_flush + interval` → buffered bytes returned; before interval → `None` (deterministic via injected `Instant`). `[REQ:pty-adapter/coalesces-output → Scenario: time tick]` `[unit]`
-- [ ] 2.6 RED: write `coalescer_drain_all_flushes_remainder_on_eof`; and assert `drain_due`/`drain_all` on an empty buffer return `None` (no empty chunk). `[REQ:pty-adapter/coalesces-output → Scenario: empty buffer flushes nothing]` `[unit]`
-- [ ] 2.7 GREEN: implement `crates/adapters/src/pty/coalescer.rs` — `Coalescer::new(max_chunk, flush_interval, now)`, `#[must_use] push(&mut self, &[u8], now) -> Option<Vec<u8>>`, `#[must_use] drain_due(now)`, `#[must_use] drain_all()`. Inject `Instant` via `now` params (no `sleep`). `[REQ:pty-adapter/coalesces-output]` `[unit]`
-- [ ] 2.8 REFACTOR: reuse `buf` across pushes; only allocation is the returned chunk (`split_off`/`mem::take`); satisfy `clippy::redundant_clone` and `-D warnings`. Re-export `Coalescer` from `pty/mod.rs`. `[REQ:hexagonal-core/clippy-hot-path]` `[ci]`
+- [x] 2.1 Create `crates/adapters/src/pty/mod.rs` (module skeleton, doc comment) and add `pub mod pty;` to `crates/adapters/src/lib.rs`. `[REQ:pty-adapter/coalesces-output]` `[unit]` (PR1)
+- [x] 2.2 RED: write `coalescer_flushes_when_size_threshold_reached` — `push` of `max_chunk + k` bytes returns a chunk of exactly `max_chunk`, remainder buffered. `[REQ:pty-adapter/coalesces-output → Scenario: size threshold]` `[unit]` (PR1)
+- [x] 2.3 RED: write `coalescer_splits_oversized_push_at_max_chunk` — push ≫ `max_chunk` returns an exact `max_chunk` chunk, rest kept buffered. `[REQ:pty-adapter/coalesces-output → Scenario: size threshold (max-chunk split)]` `[unit]` (PR1)
+- [x] 2.4 RED: write `coalescer_does_not_flush_below_size_and_time` — small `push` under interval and under size → `None`. `[REQ:pty-adapter/coalesces-output → Scenario: empty/below-threshold no flush]` `[unit]` (PR1)
+- [x] 2.5 RED: write `coalescer_drain_due_flushes_after_interval` — inject `now = last_flush + interval` → buffered bytes returned; before interval → `None` (deterministic via injected `Instant`). `[REQ:pty-adapter/coalesces-output → Scenario: time tick]` `[unit]` (PR1)
+- [x] 2.6 RED: write `coalescer_drain_all_flushes_remainder_on_eof`; and assert `drain_due`/`drain_all` on an empty buffer return `None` (no empty chunk). `[REQ:pty-adapter/coalesces-output → Scenario: empty buffer flushes nothing]` `[unit]` (PR1)
+- [x] 2.7 GREEN: implement `crates/adapters/src/pty/coalescer.rs` — `Coalescer::new(max_chunk, flush_interval, now)`, `#[must_use] push(&mut self, &[u8], now) -> Option<Vec<u8>>`, `#[must_use] drain_due(now)`, `#[must_use] drain_all()`. Inject `Instant` via `now` params (no `sleep`). `[REQ:pty-adapter/coalesces-output]` `[unit]` (PR1)
+- [x] 2.8 REFACTOR: reuse `buf` across pushes; only allocation is the returned chunk (`split_off`/`mem::take`); satisfy `clippy::redundant_clone` and `-D warnings`. Re-export `Coalescer` from `pty/mod.rs`. `[REQ:hexagonal-core/clippy-hot-path]` `[ci]` (PR1)
 - [ ] **Gate (WU-2)**: `cargo test --workspace` green (all 5 coalescer tests); `cargo fmt --check`; `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 
 ---
@@ -68,12 +68,12 @@ WU-1 (deps) ──┬── WU-2 (Coalescer) ──┐
 **Strict TDD**: pure builder + default_shell get RED tests first; `PtyAdapter` (real portable-pty) has NO unit test (covered by manual acceptance + the command-layer fake in WU-4).
 **Rollback**: revert → no transport/adapter; coalescer (WU-2) stands alone.
 
-- [ ] 3.1 RED: write `default_shell_prefers_env_shell` and `default_shell_falls_back_when_unset` using an injected env getter (`impl Fn(&str) -> Option<String>`). `[REQ:pty-adapter/spawns-shell → Scenario: default shell per OS]` `[unit]`
-- [ ] 3.2 RED: write `pty_spawn_config_shell_sets_program_and_size` — `PtySpawnConfig::shell(cols, rows, cwd)` yields program/cwd/size matching inputs, asserted on the pure struct (NOT portable-pty internals). `[REQ:pty-adapter/spawns-shell → Scenario: spawn-input construction]` `[unit]`
-- [ ] 3.3 GREEN: implement `crates/adapters/src/pty/config.rs` — `PtySpawnConfig { program, args, cwd, cols, rows }` (`Debug,Clone,PartialEq,Eq`), `PtySpawnConfig::shell(...)`, `default_shell(get_env)` ($SHELL→/bin/bash unix; %COMSPEC%/cmd.exe windows). MUST NOT be named/shaped as an agent type (no `LaunchSpec`/`AgentSpec`). `[REQ:pty-adapter/spawns-shell]` `[unit]`
-- [ ] 3.4 GREEN: implement `crates/adapters/src/pty/transport.rs` — `pub trait PtyTransport: Send { write(&mut, &[u8]); resize(&mut, u16, u16); kill(&mut); }` all `-> Result<(), PtyError>`; object-safe; NOT a Core port. `[REQ:pty-adapter/accepts-input-resize-kill]` `[unit]`
-- [ ] 3.5 GREEN: implement `crates/adapters/src/pty/adapter.rs` — `PtyError` (thiserror enum: Open/Spawn/Io/Resize/UnknownId/Poisoned), `PtyAdapter { master, writer, child }`, `PtyAdapter::spawn(cfg) -> Result<(Self, Box<dyn Read + Send>), PtyError>` (native_pty_system → openpty → CommandBuilder → take_writer + try_clone_reader), and `impl PtyTransport for PtyAdapter` (write_all / master.resize(PtySize) raising SIGWINCH / child.kill). `[REQ:pty-adapter/accepts-input-resize-kill]` `[REQ:pty-adapter/spawns-shell]` `[unit]/[manual]`
-- [ ] 3.6 Re-export from `crates/adapters/src/lib.rs`: `pub use pty::{PtyAdapter, PtySpawnConfig, Coalescer, PtyTransport, PtyError};`. `[REQ:pty-adapter/spawns-shell]` `[unit]`
+- [x] 3.1 RED: write `default_shell_prefers_env_shell` and `default_shell_falls_back_when_unset` using an injected env getter (`impl Fn(&str) -> Option<String>`). `[REQ:pty-adapter/spawns-shell → Scenario: default shell per OS]` `[unit]` (PR1)
+- [x] 3.2 RED: write `pty_spawn_config_shell_sets_program_and_size` — `PtySpawnConfig::shell(cols, rows, cwd)` yields program/cwd/size matching inputs, asserted on the pure struct (NOT portable-pty internals). `[REQ:pty-adapter/spawns-shell → Scenario: spawn-input construction]` `[unit]` (PR1)
+- [x] 3.3 GREEN: implement `crates/adapters/src/pty/config.rs` — `PtySpawnConfig { program, args, cwd, cols, rows }` (`Debug,Clone,PartialEq,Eq`), `PtySpawnConfig::shell(...)`, `default_shell(get_env)` ($SHELL→/bin/bash unix; %COMSPEC%/cmd.exe windows). MUST NOT be named/shaped as an agent type (no `LaunchSpec`/`AgentSpec`). `[REQ:pty-adapter/spawns-shell]` `[unit]` (PR1)
+- [x] 3.4 GREEN: implement `crates/adapters/src/pty/transport.rs` — `pub trait PtyTransport: Send { write(&mut, &[u8]); resize(&mut, u16, u16); kill(&mut); }` all `-> Result<(), PtyError>`; object-safe; NOT a Core port. `[REQ:pty-adapter/accepts-input-resize-kill]` `[unit]` (PR1)
+- [x] 3.5 GREEN: implement `crates/adapters/src/pty/adapter.rs` — `PtyError` (thiserror enum: Open/Spawn/Io/Resize/UnknownId/Poisoned), `PtyAdapter { master, writer, child }`, `PtyAdapter::spawn(cfg) -> Result<(Self, Box<dyn Read + Send>), PtyError>` (native_pty_system → openpty → CommandBuilder → take_writer + try_clone_reader), and `impl PtyTransport for PtyAdapter` (write_all / master.resize(PtySize) raising SIGWINCH / child.kill). `[REQ:pty-adapter/accepts-input-resize-kill]` `[REQ:pty-adapter/spawns-shell]` `[unit]/[manual]` (PR1; PtyAdapter has no unit test by design — covered by WU-4 fake + manual acceptance)
+- [x] 3.6 Re-export from `crates/adapters/src/lib.rs`: `pub use pty::{PtyAdapter, PtySpawnConfig, Coalescer, PtyTransport, PtyError};`. `[REQ:pty-adapter/spawns-shell]` `[unit]` (PR1)
 - [ ] **Gate (WU-3)**: `cargo test --workspace` green (config + default_shell tests); `cargo fmt --check`; `cargo clippy ... -- -D warnings`; `cargo deny --manifest-path crates/core/Cargo.toml check bans` exits 0 (Core still clean).
 
 ---
