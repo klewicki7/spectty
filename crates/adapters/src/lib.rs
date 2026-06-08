@@ -7,5 +7,7 @@
 //!   network transport is deferred to M3.
 
 pub mod persistence;
+pub mod pty;
 
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
+pub use pty::Coalescer;
