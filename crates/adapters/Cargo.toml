@@ -7,9 +7,11 @@ license.workspace = true
 publish = false
 
 # Adapters depend on the core plus serialization/error helpers. NO tauri, NO
-# reqwest (real engram HTTP transport is M3).
+# reqwest (real engram HTTP transport is M3). portable-pty (M1) lives here — the
+# real PTY backend belongs to the adapter layer, never to spectty-core.
 [dependencies]
 spectty-core = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+portable-pty = "0.9.0"
