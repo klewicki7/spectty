@@ -17,11 +17,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # sccache wrapper — PROVISIONAL (design open question Q2). Enabled for M0 to keep
-  # the first clean Tauri build under the <30min onboarding budget. Measure real
-  # speedup at verify; drop if incremental builds are already fast enough.
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
+  # NOTE: sccache (RUSTC_WRAPPER) was REMOVED. As a global wrapper it made every cargo
+  # invocation depend on the GitHub Actions Cache service; that service returned HTTP 400
+  # and took down the whole run — the single-point-of-failure the M0 verify flagged as W2.
+  # `actions/cache` below already provides incremental builds; sccache is not worth the SPOF.
 
 jobs:
   ci:
@@ -36,10 +35,6 @@ jobs:
         uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
-
-      # sccache: PROVISIONAL build cache (see RUSTC_WRAPPER note above).
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       # Cache Cargo registry/index/build artifacts keyed on the lockfile.
       - name: Cache Cargo
