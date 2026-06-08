@@ -1,0 +1,4 @@
+# Only the React frontend is a pnpm workspace package. The Rust crates
+# (crates/*, src-tauri) are managed by Cargo, not pnpm.
+packages:
+  - "ui"
