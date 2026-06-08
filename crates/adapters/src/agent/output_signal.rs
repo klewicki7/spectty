@@ -48,12 +48,16 @@ enum AnsiState {
 /// output. State accumulates across [`ingest`](Self::ingest) calls.
 #[derive(Debug)]
 pub struct OutputSignalProducer {
-    /// ANSI-stripped printable text, bounded to ~`window_bytes` (drop-oldest front).
-    window: String,
+    /// ANSI-stripped printable text held as RAW BYTES, bounded to `window_bytes`
+    /// (drop-oldest front). Stored as bytes (mirroring [`Coalescer`](crate::pty::Coalescer))
+    /// rather than a `String` so multibyte UTF-8 fed byte-by-byte across `ingest`
+    /// calls stays intact; [`snapshot`](Self::snapshot) decodes it lossily.
+    window: Vec<u8>,
     /// Current position of the hand-rolled ANSI state machine.
     ansi_state: AnsiState,
-    /// Soft byte cap for `window`; the window is truncated from the front once it
-    /// grows past this on an `ingest`.
+    /// True byte cap for `window`; the window is truncated from the front (then
+    /// forward-scanned to the next UTF-8 lead byte) once it grows past this on an
+    /// `ingest`, so the front never starts mid-char.
     window_bytes: usize,
     /// Child exit code once the process has exited (`None` while running). Set via
     /// [`mark_exit`](Self::mark_exit); never cleared by `ingest` so the windowed text
@@ -67,7 +71,7 @@ impl OutputSignalProducer {
     #[must_use]
     pub fn new(window_bytes: usize) -> Self {
         Self {
-            window: String::with_capacity(window_bytes),
+            window: Vec::with_capacity(window_bytes),
             ansi_state: AnsiState::Ground,
             window_bytes,
             exit_code: None,
@@ -107,7 +111,10 @@ impl OutputSignalProducer {
     #[must_use]
     pub fn snapshot(&self, last_byte_at: Timestamp, idle_ms: u64, is_active: bool) -> OutputSignal {
         OutputSignal {
-            text_window: self.window.clone(),
+            // Decode the raw byte window lossily: well-formed multibyte UTF-8 is
+            // preserved verbatim and only a genuinely-broken boundary fragment becomes
+            // U+FFFD. Cold path, so the clone via `into_owned` is acceptable.
+            text_window: String::from_utf8_lossy(&self.window).into_owned(),
             is_active,
             exit_code: self.exit_code,
             last_byte_at,
@@ -164,25 +171,31 @@ impl OutputSignalProducer {
     /// whitespace (`\n`, `\r`, `\t`) are dropped so the scraped text stays clean.
     fn push_printable(&mut self, byte: u8) {
         if byte == b'\n' || byte == b'\r' || byte == b'\t' || byte >= 0x20 {
-            // PTY output is UTF-8 in practice; pushing the raw byte as a char keeps the
-            // window a `String` while preserving ASCII verbatim. Multi-byte UTF-8 bytes
-            // each land as their own scalar, which is acceptable for substring scraping
-            // (patterns are ASCII) and never panics.
-            self.window.push(byte as char);
+            // Store the RAW byte. The window is a `Vec<u8>` decoded lazily via
+            // `String::from_utf8_lossy` at `snapshot`, so multibyte UTF-8 fed
+            // byte-by-byte across `ingest` calls stays intact — a `byte as char` cast
+            // would instead map each byte to its Latin-1 code point (U+0000..=U+00FF),
+            // corrupting any non-ASCII scalar (e.g. the `❯` prompt marker in the
+            // ClaudeCodeRunner pattern table, whose patterns are NOT all ASCII).
+            self.window.push(byte);
         }
     }
 
-    /// Truncate the window from the FRONT (drop-oldest) once it exceeds `window_bytes`,
-    /// keeping the most recent text on a char boundary.
+    /// Truncate the window from the FRONT (drop-oldest) once it exceeds `window_bytes`.
+    ///
+    /// Drops the oldest bytes down to the byte cap, then forward-scans past any UTF-8
+    /// CONTINUATION bytes (`0x80..=0xBF`) to the next lead byte, so the window front
+    /// never starts mid-char and `from_utf8_lossy` does not emit a leading U+FFFD.
+    /// `window_bytes` is therefore a true byte cap (the kept slice may be a few bytes
+    /// shorter when the cut lands inside a multibyte scalar).
     fn truncate_window(&mut self) {
         if self.window.len() <= self.window_bytes {
             return;
         }
-        let overflow = self.window.len() - self.window_bytes;
-        // Advance to the next char boundary at or after `overflow` so the drain never
-        // splits a multi-byte scalar.
-        let mut cut = overflow;
-        while cut < self.window.len() && !self.window.is_char_boundary(cut) {
+        let mut cut = self.window.len() - self.window_bytes;
+        // A continuation byte matches 0b10xxxxxx; advance to the next lead byte (any
+        // byte that is NOT a continuation byte) so the front is on a char boundary.
+        while cut < self.window.len() && (self.window[cut] & 0xC0) == 0x80 {
             cut += 1;
         }
         self.window.drain(..cut);
@@ -272,6 +285,74 @@ mod tests {
         // carries the scraped output alongside the exit code.
         assert_eq!(signal.exit_code, Some(0));
         assert_eq!(signal.text_window, "output before exit");
+    }
+
+    #[test]
+    fn producer_preserves_multibyte_utf8() {
+        let mut p = OutputSignalProducer::new(WINDOW);
+        // The `❯` prompt marker (U+276F, bytes [0xE2,0x9D,0xAF]) is part of
+        // `ClaudeCodeRunner`'s awaiting-input pattern table (`"❯ 1. Yes"`). The window
+        // must store it intact so `text_window.contains("❯ 1. Yes")` can match — a
+        // byte-as-char (Latin-1) mapping mangles it into 3 bogus scalars.
+        p.ingest("❯ 1. Yes".as_bytes());
+        assert_eq!(snapshot_now(&p).text_window, "❯ 1. Yes");
+    }
+
+    #[test]
+    fn producer_preserves_multibyte_utf8_split_across_ingests() {
+        let mut p = OutputSignalProducer::new(WINDOW);
+        // `❯` (U+276F) split mid-char across two ingest calls: byte-wise folding must
+        // still reassemble the intact scalar once both halves have arrived.
+        let marker = "❯".as_bytes(); // [0xE2, 0x9D, 0xAF]
+        p.ingest(&marker[..1]);
+        p.ingest(&marker[1..]);
+        p.ingest(b" go");
+        assert_eq!(snapshot_now(&p).text_window, "❯ go");
+    }
+
+    #[test]
+    fn producer_truncate_window_on_multibyte_boundary() {
+        // A tiny byte cap forced to cut THROUGH a multibyte char. Truncation must not
+        // panic and the surviving front must be a valid char boundary — no stray
+        // U+FFFD replacement char or dangling continuation byte at the window front.
+        let mut p = OutputSignalProducer::new(4);
+        // "❯❯" is 6 bytes; a 4-byte cap drops the first `❯` and forward-scans past its
+        // dangling continuation bytes, leaving the second `❯` (3 bytes) intact.
+        p.ingest("❯❯".as_bytes());
+        let text = snapshot_now(&p).text_window;
+        assert_eq!(text, "❯", "front must be a whole multibyte char, no U+FFFD");
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "no replacement char from a mid-char window front"
+        );
+    }
+
+    #[test]
+    fn producer_lone_esc_then_printable() {
+        let mut p = OutputSignalProducer::new(WINDOW);
+        // Lone ESC followed by a printable: the Esc state's `_ =>` arm treats the
+        // printable as the selector byte of a two-byte escape and swallows it, then
+        // returns to Ground. Documented + pinned contract (see `step`'s Esc arm).
+        p.ingest(b"\x1bZafter");
+        assert_eq!(snapshot_now(&p).text_window, "after");
+    }
+
+    #[test]
+    fn producer_csi_private_and_intermediate_bytes() {
+        let mut p = OutputSignalProducer::new(WINDOW);
+        // CSI with a private-marker `?` (hide cursor `\x1b[?25l`) and a CSI carrying an
+        // intermediate byte (`\x1b[1 q`, space = 0x20 intermediate) must both be fully
+        // stripped — parameter/intermediate bytes (0x20..=0x3f) stay inside the CSI.
+        p.ingest(b"\x1b[?25l\x1b[1 qtext");
+        assert_eq!(snapshot_now(&p).text_window, "text");
+    }
+
+    #[test]
+    fn producer_preserves_newline_tab_drops_other_control() {
+        let mut p = OutputSignalProducer::new(WINDOW);
+        // Common whitespace (`\n`, `\r`, `\t`) is kept; a Ground BEL (`\x07`) is dropped.
+        p.ingest(b"a\nb\rc\td\x07e");
+        assert_eq!(snapshot_now(&p).text_window, "a\nb\rc\tde");
     }
 
     #[test]
