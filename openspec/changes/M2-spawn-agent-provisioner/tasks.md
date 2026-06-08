@@ -111,14 +111,14 @@ WU-8 (spectty-mcp stub, independent) ──────────────�
 **Rollback**: revert → no registry; types stand alone.
 **PR slice**: PR1.
 
-- [ ] 4.1 RED: `registry_create_then_lookup_returns_same_session` — mint+insert, look up by id, assert workspace+agent match. `[REQ:session-registry/create-lookup-close → Scenario: create then look up]` `[unit]`
-- [ ] 4.2 RED: `registry_close_removes_from_lookup` — remove → subsequent lookup absent. `[REQ:session-registry/create-lookup-close → Scenario: close removes]` `[unit]`
-- [ ] 4.3 RED: `registry_mints_distinct_ids_via_shared_ref` — two `mint_id()` through `&self` yield distinct monotonic ids (migrates `next_pty_id`). `[REQ:session-registry/create-lookup-close → Scenario: mints ids via &self]` `[unit]` `[D13]`
-- [ ] 4.4 RED: `apply_observed_returns_some_only_on_change` — feed an observation that changes status → `Some(new)`; a legal no-op or terminal-absorbing → `None`. `[REQ:session-registry/create-lookup-close]` `[unit]` `[D19]`
-- [ ] 4.5 RED: `registry_holds_no_os_handle` — assert the stored entry shape is `Session` domain state only (compile-level / structural; no `portable-pty`/`tauri` import in core). `[REQ:session-registry/distinct-from-ptyregistry → Scenario: holds no OS handle]` `[unit]`
-- [ ] 4.6 GREEN: create `crates/core/src/entities/session_registry.rs` — `SessionRegistry { inner: Mutex<RegistryInner> }`, `RegistryInner { sessions, next_id }`; `mint_id(&self)`, `insert(&self, Session)`, `apply_observed(&self, &SessionId, Observed) -> Option<AgentStatus>` (calls `transition` INSIDE the lock — D19, avoids TOCTOU), `get`, `summaries() -> Vec<SessionSummary>`, `remove`. `SessionSummary { id, title, status, agent_kind }` serde. `[REQ:session-registry/create-lookup-close]` `[REQ:session-registry/distinct-from-ptyregistry]` `[unit]` `[D13][D19]`
-- [ ] 4.7 GREEN: re-export `SessionRegistry` + `SessionSummary` from `lib.rs`. `[REQ:hexagonal-core/core-no-new-deps]` `[ci]`
-- [ ] **Gate (WU-4)**: `cargo test --workspace` green; fmt/clippy clean; `cargo deny --manifest-path crates/core/Cargo.toml check bans` exits 0 — **Core domain complete and still quarantined.**
+- [x] 4.1 RED: `registry_create_then_lookup_returns_same_session` — mint+insert, look up by id, assert workspace+agent match. `[REQ:session-registry/create-lookup-close → Scenario: create then look up]` `[unit]`
+- [x] 4.2 RED: `registry_close_removes_from_lookup` — remove → subsequent lookup absent. `[REQ:session-registry/create-lookup-close → Scenario: close removes]` `[unit]`
+- [x] 4.3 RED: `registry_mints_distinct_ids_via_shared_ref` — two `mint_id()` through `&self` yield distinct monotonic ids (migrates `next_pty_id`). `[REQ:session-registry/create-lookup-close → Scenario: mints ids via &self]` `[unit]` `[D13]`
+- [x] 4.4 RED: `apply_observed_returns_some_only_on_change` (+ `apply_observed_terminal_is_absorbing_and_unemitted` + `apply_observed_on_absent_session_is_none`) — change → `Some(new)`; legal no-op / terminal-absorbing / absent → `None`. `[REQ:session-registry/create-lookup-close]` `[unit]` `[D19]`
+- [x] 4.5 RED: `registry_holds_no_os_handle` — serde round-trip of the stored entry proves it is `Session` domain state only (an OS handle could not survive serde); no `portable-pty`/`tauri` import in core. `[REQ:session-registry/distinct-from-ptyregistry → Scenario: holds no OS handle]` `[unit]`
+- [x] 4.6 GREEN: created `crates/core/src/entities/session_registry.rs` — `SessionRegistry { inner: Mutex<RegistryInner> }`, `RegistryInner { sessions, next_id }`; `mint_id(&self)`, `insert(&self, Session)`, `apply_observed(&self, &SessionId, Observed) -> Option<AgentStatus>` (calls `transition` INSIDE the lock — D19, avoids TOCTOU), `get`, `summaries() -> Vec<SessionSummary>`, `remove`. `SessionSummary { id, title, status, agent_kind }` serde + `From<&Session>`. `[REQ:session-registry/create-lookup-close]` `[REQ:session-registry/distinct-from-ptyregistry]` `[unit]` `[D13][D19]`
+- [x] 4.7 GREEN: re-exported `SessionRegistry` + `SessionSummary` from `entities/mod.rs` + `lib.rs`. `[REQ:hexagonal-core/core-no-new-deps]` `[ci]`
+- [x] **Gate (WU-4)**: `cargo test --workspace` green (core 30, +9 registry tests); fmt clean; clippy `-D warnings` clean; `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok`; `cargo build -p spectty` Finished — **Core domain complete and still quarantined.**
 
 ---
 
