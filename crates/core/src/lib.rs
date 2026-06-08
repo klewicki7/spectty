@@ -21,5 +21,6 @@ pub use entities::{
     SessionSummary, Workspace, WorkspaceId,
 };
 pub use ports::{
-    AgentRunner, ClockPort, LaunchContext, LaunchSpec, PersistenceError, PersistencePort, Timestamp,
+    AgentRunner, ClockPort, LaunchContext, LaunchSpec, PersistenceError, PersistencePort,
+    ProvisioningError, ProvisioningHandle, ProvisioningPort, ProvisioningScope, Timestamp,
 };

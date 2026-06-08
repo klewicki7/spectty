@@ -11,7 +11,14 @@ publish = false
 # real PTY backend belongs to the adapter layer, never to spectty-core.
 [dependencies]
 spectty-core = { workspace = true }
-serde_json = { workspace = true }
+# `preserve_order` backs `serde_json::Value` with `indexmap` so the JSON
+# namespace editor (provision/json_namespace.rs) keeps the user's existing
+# `~/.claude.json` keys in their ORIGINAL order instead of re-sorting them
+# alphabetically. This feature is scoped to the ADAPTERS crate ONLY — Core
+# depends on serde_json as a DEV-dependency exclusively, so neither serde_json
+# nor indexmap ever enters Core's runtime (`-e normal`) graph; the hexagonal
+# quarantine and `cargo deny ... check bans` stay green.
+serde_json = { workspace = true, features = ["preserve_order"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 portable-pty = "0.9.0"
