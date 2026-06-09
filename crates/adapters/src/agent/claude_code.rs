@@ -103,8 +103,15 @@ impl AgentRunner for ClaudeCodeRunner {
         if signal.is_active {
             return Some(Observed::Working);
         }
-        // No confident observation → no transition, no event.
-        None
+        // Quiescent (the spinner stopped emitting) with no pending permission
+        // prompt → the agent is idle at its prompt. Quietness — NOT a scraped
+        // footer string — is the robust Ready signal (mirrors GenericRunner). In
+        // Claude Code v2.1.169 the footer is IDENTICAL between working and idle
+        // (e.g. "bypass permissions on (shift+tab to cycle)"), so only `is_active`
+        // distinguishes them; the empirical `ready` patterns above remain a
+        // best-effort fast-path. Unlike the Generic runner this never times out to
+        // Completed — a Cooperative session stays Idle until it exits.
+        Some(Observed::Ready)
     }
 
     fn descriptor(&self) -> AgentDescriptor {
@@ -174,11 +181,42 @@ mod tests {
     }
 
     #[test]
-    fn claude_detect_status_no_match_and_inactive_is_none() {
+    fn claude_detect_status_quiescent_no_prompt_is_ready() {
+        // Quietness — NOT a scraped footer string — is the robust Idle signal
+        // (mirrors GenericRunner). A quiescent session with no pending permission
+        // prompt is idle at its prompt, even when no `ready` pattern matches.
         let runner = ClaudeCodeRunner::new();
         assert_eq!(
             runner.detect_status(&signal("nothing recognizable here", false, None)),
-            None
+            Some(Observed::Ready)
+        );
+    }
+
+    #[test]
+    fn claude_detect_status_quiescent_bypass_footer_is_ready() {
+        // Real Claude Code v2.1.169 idle (exit-criterion 1, L4): the footer shows
+        // the permission-mode hint, there is NO spinner, and the PTY is quiescent.
+        // The footer is IDENTICAL between working and idle, so only quietness can
+        // distinguish them — this MUST observe Ready, not stick at Working.
+        let runner = ClaudeCodeRunner::new();
+        let window = "bypass permissions on (shift+tab to cycle) · ← for agents";
+        assert_eq!(
+            runner.detect_status(&signal(window, false, None)),
+            Some(Observed::Ready)
+        );
+    }
+
+    #[test]
+    fn claude_detect_status_active_spinner_with_bypass_footer_is_working() {
+        // Real v2.1.169 working: the same mode-hint footer is STILL present, but a
+        // spinner line animates (bytes keep arriving → is_active). The shared
+        // footer must NOT be read as Ready while the agent is actively working.
+        let runner = ClaudeCodeRunner::new();
+        let window =
+            "Tomfoolering… (2s · thinking)\nbypass permissions on (shift+tab to cycle)";
+        assert_eq!(
+            runner.detect_status(&signal(window, true, None)),
+            Some(Observed::Working)
         );
     }
 
