@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use spectty_adapters::{
-    is_git_tracked, resolve_scope, AgentRunnerRegistry, PtyAdapter, PtySpawnConfig, SystemClock,
+    is_git_tracked, resolve_scope, AgentRunnerRegistry, PtyAdapter, PtySpawnConfig,
+    StateFileReader, SystemClock,
 };
 use spectty_core::ports::agent_runner::LaunchContext;
 use spectty_core::{
@@ -303,6 +304,11 @@ pub async fn spawn_session(
                 Arc::clone(&stop),
                 runner_kind,
                 Arc::clone(sessions.inner()),
+                // WU-8 will supply the real spectty_runtime_dir() here; for now
+                // an empty string means the hook reader path won't exist and
+                // poll() will silently return None every tick (graceful no-op).
+                String::new(),
+                id.0.clone(),
             )?;
 
             // Step 8: store the live PTY (with its provisioning handle for retraction).
@@ -399,6 +405,11 @@ pub fn get_session(
 /// - the M2 bounded signal channel (`signal_try_send`, drop-on-full), feeding the
 ///   signal thread's [`run_signal_loop`].
 ///
+/// `hook_runtime_dir` and `hook_session_id` are forwarded into the signal thread to
+/// construct the [`StateFileReader`] that polls the hook state file on each tick
+/// (WU-7/WU-8). Pass an empty string for `hook_runtime_dir` (or a nonexistent path)
+/// when no hook file is expected — `poll` returns `None` silently.
+///
 /// Returns the READ thread's `JoinHandle`; it owns and joins both the forwarder and
 /// the signal thread so a single join (via `PtyState::shutdown`) tears down all
 /// three with no leak.
@@ -411,6 +422,8 @@ fn spawn_session_threads(
     stop: Arc<AtomicBool>,
     runner_kind: spectty_core::AgentKind,
     sessions: Arc<SessionRegistry>,
+    hook_runtime_dir: String,
+    hook_session_id: String,
 ) -> Result<std::thread::JoinHandle<()>, String> {
     use std::sync::mpsc;
 
@@ -437,12 +450,18 @@ fn spawn_session_threads(
             let Some(runner) = runners.resolve(&runner_kind) else {
                 return;
             };
+            // Construct the StateFileReader inside the thread (WU-7/WU-8 wiring).
+            // The runtime dir and session id are resolved by spawn_session (WU-8) and
+            // forwarded here. For cooperative agents this points at the real state
+            // file; for Generic agents hook_runtime_dir is empty → poll returns None.
+            let mut hook_reader = StateFileReader::new(&hook_runtime_dir, &hook_session_id);
             run_signal_loop(
                 &signal_rx,
                 runner,
                 &sessions,
                 &signal_id,
                 &clock,
+                &mut hook_reader,
                 // M2 cannot retrieve the real child exit code from the read side
                 // without owning the child handle (same limitation as M1 `pty_exit`),
                 // so EOF reports a clean exit; the terminal status is `Completed`.

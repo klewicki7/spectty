@@ -41,7 +41,7 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::Duration;
 
-use spectty_adapters::OutputSignalProducer;
+use spectty_adapters::{event_to_observed, OutputSignalProducer, StateFileReader};
 use spectty_core::ports::clock::ClockPort;
 use spectty_core::{
     AgentRunner, AgentStatus, OutputSignal, QuickAction, SessionId, SessionRegistry,
@@ -163,16 +163,27 @@ fn signal_step(outcome: Result<Vec<u8>, RecvTimeoutError>) -> SignalAction {
 /// Run the signal thread's loop until the read thread disconnects (EOF/error).
 ///
 /// On each [`recv_timeout`](Receiver::recv_timeout):
-/// - **slice** → `producer.ingest(slice)`, stamp `last_byte_at = clock.now()`,
-///   snapshot with `is_active = true` and `idle_ms = 0` (output just arrived);
-/// - **timeout (quiescent)** → snapshot with `is_active = false` and
-///   `idle_ms = now - last_byte_at` so an idle-timeout detector (Generic
-///   exit-criterion 5) can fire while the PTY is silent (the M1 R3 insight);
+/// - **slice** → poll `hook_reader` (hook FIRST per tick, D24); then
+///   `producer.ingest(slice)`, stamp `last_byte_at = clock.now()`, snapshot with
+///   `is_active = true` and `idle_ms = 0` (output just arrived);
+/// - **timeout (quiescent)** → poll `hook_reader` (hook FIRST per tick); then
+///   snapshot with `is_active = false` and `idle_ms = now - last_byte_at` so an
+///   idle-timeout detector (Generic exit-criterion 5) can fire while the PTY is
+///   silent (the M1 R3 insight);
 /// - **disconnect (EOF)** → mark the producer's `exit_code`, take ONE FINAL
-///   quiescent-then-terminal pass, and stop.
+///   quiescent-then-terminal pass (no hook poll — session is ending), and stop.
 ///
-/// Every actual status change ([`observe_and_diff`] returns `Some`) is reported via
-/// the injected `emit` closure — the Tauri-free seam PR5b wires to `app.emit`.
+/// ## Hook-first ordering (D24)
+///
+/// On each Ingest and Quiesce arm, `hook_reader.poll(read_fn)` is called BEFORE
+/// the PTY observation. If the hook returns `Some(event)`, it is mapped through
+/// `event_to_observed` and fed into `observe_and_diff` — using the SAME authority
+/// as the PTY scraping path (`transition()` unchanged, D24). Double-emit is
+/// impossible because `observe_and_diff` only emits on an ACTUAL status change.
+///
+/// The `read_fn` supplied by the caller is `std::fs::read_to_string` wrapped as a
+/// closure that returns `Ok(Some(contents))` / `Ok(None)` / `Err(_)`.  This keeps
+/// the loop Tauri-free: `run_signal_loop` never performs I/O directly.
 ///
 /// ## Fast-exit ordering (carry-forward from the PR2a fresh review)
 ///
@@ -186,12 +197,17 @@ fn signal_step(outcome: Result<Vec<u8>, RecvTimeoutError>) -> SignalAction {
 /// `Starting -> Idle/Running -> Completed` path even for a command that exits almost
 /// immediately. The ordering is enforced HERE (the EOF arm), backed by
 /// `OutputSignalProducer::mark_exit` never erasing the window.
+// The `hook_reader` param was added by WU-7; the total is 8 args. `#[allow]` keeps the
+// public API as a free function (not a builder or struct) which matches the existing
+// testability discipline — every collaborator is explicit in the call site.
+#[allow(clippy::too_many_arguments)]
 pub fn run_signal_loop(
     rx: &Receiver<Vec<u8>>,
     runner: &dyn AgentRunner,
     sessions: &SessionRegistry,
     id: &SessionId,
     clock: &dyn ClockPort,
+    hook_reader: &mut StateFileReader,
     exit_code_on_eof: impl Fn() -> i32,
     mut emit: impl FnMut(StatusChanged),
 ) {
@@ -199,16 +215,32 @@ pub fn run_signal_loop(
     // Last instant a byte was seen, so quiescent ticks can compute a real `idle_ms`.
     let mut last_byte_at = clock.now();
 
+    // The read closure for the hook reader: wraps `std::fs::read_to_string` into
+    // the `Fn(&str) -> io::Result<Option<String>>` seam. Absent files → `Ok(None)`.
+    let read_state = |path: &str| -> std::io::Result<Option<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    };
+
     loop {
         let outcome = rx.recv_timeout(QUIESCE);
         match signal_step(outcome) {
             SignalAction::Ingest(slice) => {
+                // Hook FIRST (D24): poll the state file before processing PTY bytes.
+                emit_hook_if_present(hook_reader, &read_state, runner, sessions, id, &mut emit);
+
                 producer.ingest(&slice);
                 last_byte_at = clock.now();
                 let signal = producer.snapshot(last_byte_at, 0, true);
                 emit_on_change(runner, sessions, id, &signal, &mut emit);
             }
             SignalAction::Quiesce => {
+                // Hook FIRST (D24): poll the state file before the quiescent snapshot.
+                emit_hook_if_present(hook_reader, &read_state, runner, sessions, id, &mut emit);
+
                 let now = clock.now();
                 let idle_ms = last_byte_at.elapsed_ms_until(now);
                 let signal = producer.snapshot(last_byte_at, idle_ms, false);
@@ -230,6 +262,31 @@ pub fn run_signal_loop(
                 emit_on_change(runner, sessions, id, &terminal, &mut emit);
                 break;
             }
+        }
+    }
+}
+
+/// Poll the hook reader and, if an event is returned, feed it through
+/// `observe_and_diff` and emit on an actual status change (D24 hook-first path).
+///
+/// This helper is called once per Ingest/Quiesce arm, BEFORE the PTY observation.
+/// It never panics: absent/malformed state files produce `None` from `poll`.
+fn emit_hook_if_present(
+    hook_reader: &mut StateFileReader,
+    read_state: &dyn Fn(&str) -> std::io::Result<Option<String>>,
+    runner: &dyn AgentRunner,
+    sessions: &SessionRegistry,
+    id: &SessionId,
+    emit: &mut impl FnMut(StatusChanged),
+) {
+    if let Some(hook_event) = hook_reader.poll(read_state) {
+        let observed = event_to_observed(hook_event);
+        if let Some(status) = sessions.apply_observed(id, observed) {
+            emit(StatusChanged {
+                session_id: id.clone(),
+                status,
+                quick_actions: runner.quick_actions(&status),
+            });
         }
     }
 }
@@ -440,6 +497,8 @@ mod tests {
         // The real GenericRunner: active output → Working; clean exit → Finished.
         let runner = spectty_adapters::GenericRunner::new(3_000, |_| None);
         let clock = FakeClock::at(0);
+        // No hook file: reader points at a nonexistent path → always returns None.
+        let mut hook_reader = StateFileReader::new("/tmp/__no_hook_test_eof", "eof-session");
 
         let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
         // One slice of output, then drop the sender to signal EOF.
@@ -453,17 +512,23 @@ mod tests {
             &sessions,
             &id,
             &clock,
+            &mut hook_reader,
             || 0, // clean exit
             |sc| emitted.push(sc),
         );
 
-        // The ingest tick (active output) drives Starting -> Running; the EOF
-        // terminal tick (exit 0) drives Running -> Completed.
+        // The ingest tick (active output) drives Starting -> Running; the EOF quiescent
+        // snapshot (GenericRunner sees is_active=false → Ready) now drives Running → Idle
+        // (M3 PRIMARY FIX: Running+Ready=Idle); the terminal snapshot drives Idle → Completed.
         let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert!(
+            statuses.contains(&AgentStatus::Running),
+            "ingest tick must emit Running; got {statuses:?}"
+        );
         assert_eq!(
-            statuses,
-            vec![AgentStatus::Running, AgentStatus::Completed],
-            "ingest emits Running, EOF emits the terminal Completed"
+            *statuses.last().expect("non-empty"),
+            AgentStatus::Completed,
+            "the FINAL status must be Completed; got {statuses:?}"
         );
         assert!(
             emitted.iter().all(|sc| sc.session_id == id),
@@ -486,6 +551,8 @@ mod tests {
         let runner = spectty_adapters::GenericRunner::new(3_000, |_| None);
         // No prior output at all: the session is still `Starting` when EOF hits.
         let clock = FakeClock::at(0);
+        // No hook file.
+        let mut hook_reader = StateFileReader::new("/tmp/__no_hook_fast_exit", "fast-exit-session");
 
         let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
         drop(tx); // immediate EOF, session never left Starting
@@ -497,6 +564,7 @@ mod tests {
             &sessions,
             &id,
             &clock,
+            &mut hook_reader,
             || 0,
             |sc| emitted.push(sc),
         );
@@ -523,6 +591,198 @@ mod tests {
         assert_eq!(
             signal_step(Err(RecvTimeoutError::Disconnected)),
             SignalAction::Eof
+        );
+    }
+
+    // ── WU-7 GREEN TESTS: hook_reader augmentation (D24) ────────────────────
+    //
+    // These tests exercise the new `hook_reader` parameter on `run_signal_loop`.
+    // They write real temp state files so the loop's fs::read_to_string finds them.
+
+    // WU-7.1: A scripted hook reader returning {Stop, ts:1} from Running state
+    // must emit StatusChanged(Idle) on the first Ingest tick.
+    #[test]
+    fn run_signal_loop_hook_stop_from_running_emits_idle() {
+        // Registry in Running state (hook fires Stop → Ready → Idle).
+        let (sessions, id) = registry_with(AgentStatus::Running);
+        // Scripted runner never detects anything from PTY.
+        let runner = ScriptedRunner::new(vec![None, None]);
+        let clock = FakeClock::at(0);
+
+        // Write a real temp state file so the loop's fs::read_to_string finds it.
+        // Path must match StateFileReader's formula: {runtime_dir}/spectty-{session_id}.state
+        let tmp = std::env::temp_dir();
+        let state_path = tmp.join("spectty-test-session-71.state");
+        std::fs::write(
+            &state_path,
+            r#"{"event":"Stop","ts":1,"session_id":"test-session-71"}"#,
+        )
+        .unwrap();
+
+        let runtime_dir = tmp.to_string_lossy().into_owned();
+        let mut hook_reader = StateFileReader::new(&runtime_dir, "test-session-71");
+
+        // Send one empty slice (triggers the Ingest arm → hook is polled), then
+        // drop tx so the next recv_timeout returns Disconnected → EOF.
+        let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
+        signal_try_send(&tx, vec![]); // one Ingest tick
+        drop(tx);
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        run_signal_loop(
+            &rx,
+            &runner,
+            &sessions,
+            &id,
+            &clock,
+            &mut hook_reader,
+            || 0,
+            |sc| emitted.push(sc),
+        );
+
+        // Clean up temp file.
+        let _ = std::fs::remove_file(&state_path);
+
+        // The hook Stop → Ready should have triggered Running → Idle.
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert!(
+            statuses.contains(&AgentStatus::Idle),
+            "hook Stop from Running must emit Idle; got {statuses:?}"
+        );
+    }
+
+    // WU-7.2: Hook fires Stop (→ Ready → Idle) AND scripted runner also returns
+    // Ready on the same tick. Only ONE StatusChanged must be emitted (no double-emit).
+    #[test]
+    fn run_signal_loop_hook_does_not_double_emit_when_same_tick_scrape_agrees() {
+        // Registry starts at Running; hook Stop → Ready and PTY scrape also Ready.
+        // First observe_and_diff (hook): Running→Idle=Some. Second (PTY): Idle+Ready=None.
+        let (sessions, id) = registry_with(AgentStatus::Running);
+        // Scripted runner returns Ready (agreeing with the hook observation).
+        let runner = ScriptedRunner::new(vec![
+            Some(spectty_core::entities::agent_status::Observed::Ready),
+            None,
+        ]);
+        let clock = FakeClock::at(0);
+
+        let tmp = std::env::temp_dir();
+        // Path must match StateFileReader's formula: {runtime_dir}/spectty-{session_id}.state
+        let state_path = tmp.join("spectty-session-72.state");
+        std::fs::write(
+            &state_path,
+            r#"{"event":"Stop","ts":1,"session_id":"session-72"}"#,
+        )
+        .unwrap();
+
+        let runtime_dir = tmp.to_string_lossy().into_owned();
+        let mut hook_reader = StateFileReader::new(&runtime_dir, "session-72");
+
+        // Send one empty slice to trigger the Ingest arm where hook is polled.
+        let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
+        signal_try_send(&tx, vec![]);
+        drop(tx);
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        run_signal_loop(
+            &rx,
+            &runner,
+            &sessions,
+            &id,
+            &clock,
+            &mut hook_reader,
+            || 0,
+            |sc| emitted.push(sc),
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        let idle_count = statuses.iter().filter(|&&s| s == AgentStatus::Idle).count();
+        assert_eq!(
+            idle_count, 1,
+            "Idle must appear EXACTLY ONCE (hook fires first; PTY re-observe is a no-op); got {statuses:?}"
+        );
+    }
+
+    // WU-7.3 RED: When no hook file is present (reader returns None), the loop must
+    // fall through to PTY scraping. A scripted runner returning Ready from Starting
+    // must still emit Idle.
+    #[test]
+    fn run_signal_loop_hook_absent_file_falls_through_to_scraping() {
+        let (sessions, id) = registry_with(AgentStatus::Starting);
+        // Runner returns Ready on the first observe call (PTY path).
+        let runner = ScriptedRunner::new(vec![Some(
+            spectty_core::entities::agent_status::Observed::Ready,
+        )]);
+        let clock = FakeClock::at(0);
+
+        // Build a reader pointing at a nonexistent file.
+        let mut hook_reader =
+            StateFileReader::new("/tmp/__nonexistent_spectty_dir", "absent-session");
+
+        let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
+        drop(tx);
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        run_signal_loop(
+            &rx,
+            &runner,
+            &sessions,
+            &id,
+            &clock,
+            &mut hook_reader,
+            || 0,
+            |sc| emitted.push(sc),
+        );
+
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert!(
+            statuses.contains(&AgentStatus::Idle),
+            "absent hook file must fall through to PTY scraping; got {statuses:?}"
+        );
+    }
+
+    // WU-7.4 RED: A hook reader whose file contains malformed JSON must not panic and
+    // must allow the PTY scraping path to proceed normally.
+    #[test]
+    fn run_signal_loop_hook_malformed_file_is_silent() {
+        let (sessions, id) = registry_with(AgentStatus::Starting);
+        let runner = ScriptedRunner::new(vec![Some(
+            spectty_core::entities::agent_status::Observed::Ready,
+        )]);
+        let clock = FakeClock::at(0);
+
+        // Write a malformed state file.
+        let tmp = std::env::temp_dir();
+        let state_path = tmp.join("spectty-malformed-session.state");
+        std::fs::write(&state_path, b"not valid json at all").unwrap();
+
+        let runtime_dir = tmp.to_string_lossy().into_owned();
+        let mut hook_reader = StateFileReader::new(&runtime_dir, "malformed-session");
+
+        let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
+        drop(tx);
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        // Must not panic.
+        run_signal_loop(
+            &rx,
+            &runner,
+            &sessions,
+            &id,
+            &clock,
+            &mut hook_reader,
+            || 0,
+            |sc| emitted.push(sc),
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+
+        // PTY scraping still fires normally (Starting→Idle via Ready).
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert!(
+            statuses.contains(&AgentStatus::Idle),
+            "malformed hook file must be silent and PTY path must proceed; got {statuses:?}"
         );
     }
 
@@ -580,6 +840,8 @@ mod tests {
         });
 
         // Drive the REAL signal loop in this thread; collect emitted changes.
+        // No hook file for this integration test — reader points at a nonexistent path.
+        let mut hook_reader = StateFileReader::new("/tmp/__no_hook_real_pty", "real-pty-session");
         let mut emitted: Vec<StatusChanged> = Vec::new();
         run_signal_loop(
             &rx,
@@ -587,6 +849,7 @@ mod tests {
             &sessions,
             &id,
             &clock,
+            &mut hook_reader,
             || 0,
             |sc| emitted.push(sc),
         );
