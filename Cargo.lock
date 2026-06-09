@@ -2919,6 +2919,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "portable-pty",
+ "serde",
  "serde_json",
  "spectty-core",
  "thiserror 2.0.18",
@@ -2931,6 +2932,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "spectty-hook"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
