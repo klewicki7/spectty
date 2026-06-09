@@ -594,12 +594,17 @@ pass/fail gate.
   (5) Both sidecars resolve in a packaged build]` `[manual]`
 - [ ] 11.6 (best-effort, ungated) Windows `spectty-hook` binary smoke — failure does NOT block M3.
   `[REQ:cross-platform/macos-gating-windows-best-effort]` `[manual]`
-- [ ] 11.7 DOC: append D21-D25 ADR notes to `docs/architecture/` (or the project ADR index) — one
-  note per decision, referencing the new files. Record M3 R-PathAgreement and R-Settings risks as
-  RESOLVED. `[manual]`
-- [ ] 11.8 VERIFY-FLAG: confirm M3 L-settings-orphan (leaked hook rows from crashed sessions +
-  orphaned `.state` files, mitigated by `.spectty.bak` + harmless stale state + opportunistic sweep)
-  is documented as a conscious deferral to M4 boot-sweep. `[manual]`
+- [x] 11.7 DOC: append D21-D25 ADR notes to `docs/decisions/0004-agent-agnostic-core.md` — one
+  note per decision (D21–D25), referencing the implementing files. M3 risks R-PathAgreement and
+  R-Settings recorded as RESOLVED (cite WU-9 path-agreement test and WU-2 C1-granularity retract
+  tests). `[manual]`
+  **DONE (PR-5)**: notes appended at `docs/decisions/0004-agent-agnostic-core.md` §Amendment M3.
+- [x] 11.8 VERIFY-FLAG: M3 L-settings-orphan (leaked hook rows from crashed sessions + orphaned
+  `.state` files, mitigated by `.spectty.bak` + harmless stale state via session_id guard +
+  opportunistic pre-spawn sweep) is documented as a conscious deferral to M4 boot-sweep. `[manual]`
+  **DONE (PR-5)**: deferral documented in `docs/decisions/0004-agent-agnostic-core.md` §M3 deferred
+  items and in `openspec/changes/M3-hook-status-detection/acceptance.md` §Deferred items.
+  Checklist doc ready at `openspec/changes/M3-hook-status-detection/acceptance.md`.
 - [ ] **Gate (WU-11)**: all macOS criteria (11.1–11.5) pass → M3 acceptance PASS; record results for
   `sdd-verify`. Windows (11.6) informational only.
 

@@ -123,6 +123,163 @@ went idle after outputting a question" requires stateful logic. A pure config fi
 express stateful behavior. We retain the trait as the foundation and add a declarative
 layer on top in Phase 2 for the 80% of cases that are regex-matchable.
 
+## Amendment — M3 hook-based status detection (D21–D25)
+
+- Date: 2026-06-09
+- Driver: change `M3-hook-status-detection`
+
+M3 adds Anthropic's official Claude Code hook system as the **authoritative** status
+source, fixing the bypass-permissions "stuck Running" bug without changing any Core type.
+The five architectural decisions below (D21–D25) continue the M2 D-series (M2 used D7–D20).
+
+### D21 — Hooks live in `~/.claude/settings.json`; second `ClaudeSettingsProvisioner`; trait unchanged
+
+`settings.json` is a **different file** from `~/.claude.json`. A second
+`ClaudeSettingsProvisioner<F: ConfigFile>` manages only the `hooks` key in that file; it
+is a second `ProvisioningPort` impl, not an extension of `ClaudeJsonProvisioner`. The
+composition root holds it as a second `Arc<dyn ProvisioningPort>`, injected and retracted
+alongside the MCP one. `ProvisioningPort` itself is **unchanged**.
+
+R7 foreign-key preservation is GENERALIZED: `mcpServers` owned a NAMED key (`"spectty"`);
+`hooks` owns ROWS whose inner `hooks[].command` equals the sidecar path. Retract removes
+only those rows; a user's own hook on the same event survives. Same `preserve_order` /
+VALUE+ORDER contract as M2.
+
+**Risk R-Settings — RESOLVED.** The round-trip test
+(`inject_spectty_hooks_round_trip_preserves_foreign_keys_and_order`) pins foreign-hook
+survival on the same event. WU-9 path-agreement integration test pins D25 independently.
+
+**Implementing files**:
+- `crates/adapters/src/provision/json_namespace.rs` — `inject_spectty_hooks` / `retract_spectty_hooks` / `HookCommandEntry`
+- `crates/adapters/src/provision/settings_provisioner.rs` — `ClaudeSettingsProvisioner<F: ConfigFile>`
+- `crates/adapters/src/provision/scope.rs` — `settings_path_for_scope` (Global→`~/.claude/settings.json`, Project→`{root}/.claude/settings.json`)
+- `src-tauri/src/lib.rs` — composes second provisioner as `HooksProvisionerState`
+
+---
+
+### D22 — Consume-once via sidecar-owned monotonic counter `ts`; 200ms QUIESCE poll
+
+The `spectty-hook` sidecar owns a monotonic integer counter `ts`. On each invocation it
+reads the prior `.state` file for the current `ts` (default 0) and writes `ts + 1`.
+`StateFileReader` emits an event ONLY when `state.ts > self.last_ts.unwrap_or(0)`, then
+advances `last_ts`. This gives unambiguous consume-once semantics with no clock dependency
+and survives sub-200ms event bursts.
+
+Wall-clock timestamps were rejected (clock skew, same-tick collisions); `mtime` was
+rejected (coarse, FS-dependent, no Windows guarantee). The counter format is
+notify-upgradeable: a future M4 FS-watch can replace the poll loop without changing the
+sidecar protocol.
+
+**Implementing files**:
+- `crates/spectty-hook/src/main.rs` — increments counter per write
+- `crates/adapters/src/hook/reader.rs` — `StateFileReader` with `last_ts: Option<u64>`
+- `crates/adapters/src/hook/state.rs` — `HookState { event, ts, session_id }`
+
+---
+
+### D23 — `SPECTTY_SESSION_ID` is the correlation key; sidecar ignores Claude's stdin
+
+`SPECTTY_SESSION_ID` is already set in `LaunchSpec.env` (M2 established this). Claude
+Code inherits it; every hook command inherits Claude's env, so the sidecar receives it
+for free without a lookup table. The sidecar names the state file `spectty-{id}.state`
+and embeds the id in the JSON payload. `StateFileReader` checks that the `session_id`
+field matches `self.session_id` (D23 guard); a stale file from a crashed prior session
+returns `None` on every poll tick.
+
+Claude's internal hook `session_id` (passed on stdin) is a DIFFERENT identifier.
+Correlating it would require a lookup table and would tightly couple the sidecar to
+Claude Code's internal protocol, contradicting ADR-0004's agent-agnostic intent.
+
+The sidecar reads (drains) and ignores Claude's stdin JSON. This keeps the binary
+sub-millisecond and well within the sync-hook timeout.
+
+**Implementing files**:
+- `crates/spectty-hook/src/main.rs` — drains stdin, reads `SPECTTY_SESSION_ID`
+- `crates/adapters/src/hook/reader.rs` — `session_id` field + D23 guard in `poll`
+- `src-tauri/src/commands/session.rs` — passes `SPECTTY_SESSION_ID` via `PtySpawnConfig.env`
+
+---
+
+### D24 — Hooks AUGMENT scraping; hook-first per tick; `detect_status` unchanged; EOF arm ungated
+
+Hook events are fed through the SAME `observe_and_diff → transition()` authority as PTY
+bytes. On each Ingest and Quiesce tick, `run_signal_loop` polls `StateFileReader` FIRST;
+a `Some(event)` runs `observe_and_diff(event_to_observed(event))` before the PTY
+observation that tick. Double-emit is impossible: `observe_and_diff` only emits on an
+ACTUAL status change (a second same-tick observation that doesn't change status returns
+`None`).
+
+`detect_status` is **not touched** — it stays a pure PTY-scraping fn. Routing hooks INTO
+`detect_status` would have introduced file I/O into a pure function and broken its
+table-test seam.
+
+**EOF arm exception**: the EOF-driven `Ready` scraping emission is intentionally NOT
+gated behind `hooks_active`. Process exit (EOF) must still drive `Running → Idle` for
+sessions where no `Stop` hook fires (e.g. a Generic session, or a Claude session that
+exits before the hook reaches the sidecar). The `hooks_active` gate applies only to
+mid-stream PTY-scraping-derived `Ready` emissions, preventing the scraping fallback from
+racing against the hook-sourced result.
+
+**Risk R-Settings — RESOLVED** (see D21). **Risk R-Async-gap**: ≤200ms latency; scraping
+covers the gap; consume-once prevents replay.
+
+**Implementing files**:
+- `src-tauri/src/session_runtime.rs` — `run_signal_loop` with `hook_reader` param; `emit_scraping_guarded`; EOF arm unchanged
+- `crates/adapters/src/hook/state.rs` — `event_to_observed` pure mapping table
+
+---
+
+### D25 — `spectty-hook` is a standalone binary crate; both sidecars bundled via `externalBin`; runtime-dir resolver duplicated
+
+`spectty-hook` is an independent binary crate (`crates/spectty-hook/`), mirroring the
+proven `spectty-mcp` shape (serde + serde_json only; no `spectty-core`, no Tauri). A
+`spectty-mcp` subcommand was rejected: it would couple two unrelated sidecars' release
+and versioning cycles. Independent binaries keep each minimal and independently replaceable.
+
+The runtime-dir resolver (`spectty_runtime_dir()`) is ~10 lines duplicated in both
+`crates/spectty-hook/src/runtime_dir.rs` and `src-tauri/src/lib.rs`. A shared crate was
+rejected: it would require `spectty-hook` to depend on the `spectty` lib (which has a
+Tauri dependency), violating the serde-only constraint. The duplication is small enough
+that the path agreement is asserted by a load-bearing integration test.
+
+Both sidecars are bundled via the **TAURI_CONFIG overlay** mechanism:
+`src-tauri/tauri.bundle.conf.json` carries the `externalBin` declaration and is merged
+only when the Tauri CLI is invoked with `--config src-tauri/tauri.bundle.conf.json`. This
+prevents `cargo build --workspace` from failing when the sidecar binaries are absent
+(avoids the W3 footgun). The `scripts/build-sidecars.sh` script builds both release
+sidecar binaries and copies them to `src-tauri/binaries/`. It is wired as
+`beforeBuildCommand` in `tauri.conf.json`.
+
+Bundle command: `pnpm tauri build --debug --config src-tauri/tauri.bundle.conf.json`
+
+**Risk R-PathAgreement — RESOLVED.** The integration test
+`spectty_hook_end_to_end_monotonic_ts_and_path_agreement` (`src-tauri/tests/hook_integration.rs`,
+`#[cfg(unix)]`) asserts that `spectty_lib::spectty_runtime_dir()` and
+`spectty_hook::spectty_runtime_dir()` resolve to the exact same path. If they diverge,
+status never updates — silent failure prevented by this load-bearing test.
+
+**Implementing files**:
+- `crates/spectty-hook/src/runtime_dir.rs` — sidecar-side resolver
+- `crates/spectty-hook/src/lib.rs` — thin lib re-exporting `spectty_runtime_dir`
+- `src-tauri/src/lib.rs` — `spectty_hook_command()` + `spectty_runtime_dir()`
+- `scripts/build-sidecars.sh` — shellcheck-clean build script
+- `src-tauri/tauri.bundle.conf.json` — `externalBin` overlay (closes M2 L2)
+- `src-tauri/tests/hook_integration.rs` — D25 path-agreement integration test (load-bearing)
+
+---
+
+### M3 deferred items (L-settings-orphan)
+
+**L-settings-orphan — deferred to M4 boot-sweep.** A crashed session can leak hook rows
+in `settings.json` and/or an orphaned `.state` file. Mitigations shipped in M3:
+`.spectty.bak` (atomic-write backup before first write); stale-state harmlessness via
+`session_id` guard (D23); opportunistic pre-spawn sweep (`remove_stale_state_file` +
+`remove_stale_tmp_files`). Full boot-time orphan reconciliation requires the
+persistence-backed session registry and is deferred to M4. See also
+`openspec/changes/M3-hook-status-detection/acceptance.md` deferred items section.
+
+---
+
 ## Amendment — Superseded for M2+ (provisioning is a sibling Core port, not a runner method)
 
 - Date: 2026-06-08
