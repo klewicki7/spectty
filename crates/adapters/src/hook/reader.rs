@@ -17,6 +17,11 @@ use super::state::{parse_state_file, HookEvent};
 pub struct StateFileReader {
     /// Absolute path: `{runtime_dir}/spectty-{session_id}.state`.
     path: String,
+    /// The expected `$SPECTTY_SESSION_ID` for this reader instance (D23).
+    /// State files carrying a different `session_id` are silently ignored and
+    /// do NOT advance `last_ts` — they belong to a prior session reusing the
+    /// same runtime dir.
+    session_id: String,
     /// The last `ts` whose event was returned. `None` means "never seen" (treated
     /// as 0 for the strict-greater comparison so the very first event fires).
     last_ts: Option<u64>,
@@ -24,9 +29,13 @@ pub struct StateFileReader {
 
 impl StateFileReader {
     /// Build a reader for `{runtime_dir}/spectty-{session_id}.state`.
+    ///
+    /// `session_id` is stored and used in `poll` to reject stale state files
+    /// left by a prior session (D23 — SPECTTY_SESSION_ID correlation).
     pub fn new(runtime_dir: &str, session_id: &str) -> Self {
         Self {
             path: format!("{runtime_dir}/spectty-{session_id}.state"),
+            session_id: session_id.to_string(),
             last_ts: None,
         }
     }
@@ -36,12 +45,15 @@ impl StateFileReader {
         &self.path
     }
 
-    /// Read and parse the state file via `read`; return `Some(event)` ONLY if the
-    /// file's `ts` is strictly greater than the last consumed `ts`. Advances
-    /// `last_ts` on a successful consume.
+    /// Read and parse the state file via `read`; return `Some(event)` ONLY if:
+    /// 1. The file's `session_id` matches `self.session_id` (D23 correlation).
+    /// 2. The file's `ts` is strictly greater than the last consumed `ts`.
+    ///
+    /// Advances `last_ts` on a successful consume.
     ///
     /// - Absent file → `None` (the sidecar hasn't fired yet; that's fine).
     /// - Parse error → `None` (a half-written file; the next poll will retry).
+    /// - `session_id` mismatch → `None`, `last_ts` NOT advanced (stale file).
     /// - `ts <= last_ts` → `None` (already consumed this event).
     pub fn poll(
         &mut self,
@@ -49,6 +61,10 @@ impl StateFileReader {
     ) -> Option<HookEvent> {
         let contents = read(&self.path).ok().flatten()?;
         let state = parse_state_file(&contents).ok()?;
+        // D23: reject state files from a different session entirely.
+        if state.session_id != self.session_id {
+            return None;
+        }
         let threshold = self.last_ts.unwrap_or(0);
         if state.ts > threshold {
             self.last_ts = Some(state.ts);
@@ -188,5 +204,66 @@ mod tests {
         assert_eq!(reader.poll(&read_fn), Some(HookEvent::Submit)); // ts=1 fires
         assert_eq!(reader.poll(&read_fn), None);                    // ts=1 again → None
         assert_eq!(reader.poll(&read_fn), Some(HookEvent::Stop));   // ts=2 fires
+    }
+
+    // ── C2 RED TESTS: session_id correlation (D23) ────────────────────────────
+    //
+    // A state file from a PRIOR session (different session_id) MUST be silently
+    // ignored. `last_ts` MUST NOT advance on a mismatch (the reader stays ready
+    // to consume the first real event from the correct session).
+    //
+    // These tests are RED against the CURRENT code because StateFileReader::new
+    // takes only (runtime_dir, session_id) for path construction but discards the
+    // session_id — poll only checks `ts > last_ts`, so a stale file with ts=42
+    // fires a spurious event on tick 1.
+
+    /// A stale .state file whose session_id differs from the reader's expected id
+    /// MUST return None — even if ts=42 would satisfy the strict-greater predicate.
+    #[test]
+    fn poll_ignores_state_file_with_wrong_session_id() {
+        // Reader expects session "new-session" but the file carries "old-session".
+        let mut reader = StateFileReader::new("/tmp", "new-session");
+        let stale_json = r#"{"event":"Stop","ts":42,"session_id":"old-session"}"#;
+        let result = reader.poll(&fixed_reader(stale_json));
+        assert_eq!(
+            result, None,
+            "stale session_id mismatch MUST return None — not a spurious Stop event"
+        );
+    }
+
+    /// After ignoring a wrong-session file, last_ts MUST NOT have advanced.
+    /// A subsequent file with the CORRECT session_id MUST still fire.
+    #[test]
+    fn poll_does_not_advance_last_ts_on_session_id_mismatch() {
+        let mut reader = StateFileReader::new("/tmp", "new-session");
+
+        // Tick 1: wrong session_id, ts=42 → None, last_ts stays at 0.
+        let stale = r#"{"event":"Stop","ts":42,"session_id":"old-session"}"#;
+        let r1 = reader.poll(&fixed_reader(stale));
+        assert_eq!(r1, None, "wrong session must be ignored");
+
+        // Tick 2: correct session_id, ts=1 → must fire (ts=1 > last_ts=0).
+        // If last_ts were incorrectly advanced to 42, ts=1 would NOT fire.
+        let correct = r#"{"event":"Stop","ts":1,"session_id":"new-session"}"#;
+        let r2 = reader.poll(&fixed_reader(correct));
+        assert_eq!(
+            r2,
+            Some(HookEvent::Stop),
+            "first event from correct session must fire after ignoring stale session file"
+        );
+    }
+
+    /// Regression guard: a file with the CORRECT session_id and ts=42 MUST fire.
+    /// Ensures the fix doesn't break the happy path.
+    #[test]
+    fn poll_fires_for_correct_session_id() {
+        let mut reader = StateFileReader::new("/tmp", "my-session");
+        let json = r#"{"event":"Submit","ts":42,"session_id":"my-session"}"#;
+        let result = reader.poll(&fixed_reader(json));
+        assert_eq!(
+            result,
+            Some(HookEvent::Submit),
+            "correct session_id + ts=42 MUST fire"
+        );
     }
 }
