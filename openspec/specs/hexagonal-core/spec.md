@@ -43,12 +43,19 @@ import. `cargo-deny` in CI is the belt-and-suspenders secondary gate.
 > Added by change `M1-live-pty-terminal` (archived 2026-06-08) as a guard delta on the
 > baseline quarantine: M1 added PTY machinery to adapters and the bridge while leaving the
 > Core untouched.
+>
+> SUPERSEDED IN PART by change `M2-spawn-agent-provisioner` (archived 2026-06-08): the
+> M1-scoped clause forbidding an `OutputSignal` type in Core no longer applies — M2
+> deliberately introduces `OutputSignal` (and the wider agent domain) as Core port types.
+> See "Core grows the agent domain WITHOUT new dependencies and WITHOUT agent names" below.
+> The dependency-set invariant (`serde` + `thiserror` only) and the `PtyPort`-absence clause
+> remain in force.
 
 As new capabilities (PTY, terminal, etc.) are added, `spectty-core` MUST NOT gain any new
 dependency. In particular it MUST NOT depend on `portable-pty`, `tokio`, `tauri`, or any
-agent/tool crate, and MUST NOT define a `PtyPort` trait or an `OutputSignal` type. Such
-crates MUST land only in `crates/adapters` and/or `src-tauri`. The Core MUST remain
-`serde` + `thiserror` only, and the core-scoped `cargo-deny` gate MUST stay green.
+agent/tool crate, and MUST NOT define a `PtyPort` trait. Such crates MUST land only in
+`crates/adapters` and/or `src-tauri`. The Core MUST remain `serde` + `thiserror` only, and
+the core-scoped `cargo-deny` gate MUST stay green.
 
 ### Scenario: Core manifest still lists no PTY or runtime crate
 - **Given** the `spectty-core` `Cargo.toml` after a capability that introduces a PTY/runtime
@@ -61,3 +68,36 @@ crates MUST land only in `crates/adapters` and/or `src-tauri`. The Core MUST rem
 - **When** the core-scoped `cargo-deny` boundary gate runs in CI
 - **Then** it MUST exit 0 with no forbidden-dependency findings AND `cargo build` MUST
   succeed
+
+## Requirement: Core grows the agent domain WITHOUT new dependencies and WITHOUT agent names
+> Added by change `M2-spawn-agent-provisioner` (archived 2026-06-08). This requirement
+> SUPERSEDES, for M2 and beyond, the M1 guard clause forbidding an `OutputSignal` type in
+> Core: M2 deliberately introduces `OutputSignal` as a Core port type. The dependency-set
+> invariant (`serde` + `thiserror` only) and the agent-agnostic invariant remain in force.
+
+M2 MUST add `AgentRunner`, `ProvisioningPort`, `OutputSignal`, `AgentSpec`/`AgentTier`/
+`AgentDescriptor`, `LaunchSpec`, the pure `transition` function, the grown `Session`, and
+`SessionRegistry` to `spectty-core` with ZERO new dependencies — the Core MUST remain `serde`
++ `thiserror` only (no `tokio`, `tauri`, `portable-pty`, time crate, or agent/tool crate; the
+`ClockPort`-style time seam is a Core TRAIT whose concrete clock lives outside Core). The Core
+MUST contain NO agent-name literal and NO config-format or ANSI/regex knowledge. The
+core-scoped `cargo-deny` gate MUST stay green.
+
+### Scenario: Core manifest still lists only serde + thiserror after M2
+- **Given** the `spectty-core` `Cargo.toml` after M2
+- **When** its dependency list is inspected
+- **Then** it MUST remain limited to `serde` + `thiserror`, with NO `tokio`, `tauri`,
+  `portable-pty`, time crate, or agent/tool crate added
+
+### Scenario: No agent name appears anywhere in the Core
+- **Given** the `spectty-core` source after M2
+- **When** it is scanned for agent-name literals
+- **Then** there MUST be no `"claude"`, no `"bash"`, and no `if agent == …` branch anywhere in
+  Core — all agent-specific logic MUST live in `crates/adapters` / `src-tauri`
+
+### Scenario: core-scoped cargo-deny stays green and clippy is clean
+- **Given** the M2 changes applied (runners + provisioner + producer in adapters/src-tauri,
+  Core grown but quarantined)
+- **When** the core-scoped `cargo-deny` boundary gate and `clippy -D warnings` run in CI
+- **Then** `cargo-deny` MUST exit 0 with no forbidden-dependency findings AND clippy MUST
+  report no warnings AND `cargo build` MUST succeed
