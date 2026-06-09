@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import { PaneHeader, statusBadge } from "../../src/components/PaneHeader";
 import type { AgentStatus } from "../../src/session/ipc";
@@ -57,5 +57,20 @@ describe("PaneHeader component", () => {
     const { container } = render(<PaneHeader title="" status={null} />);
     const titleEl = container.querySelector(".pane-header__title");
     expect(titleEl?.textContent).toBe("No session");
+  });
+
+  it("renders a Close button and calls onClose when clicked", () => {
+    const onClose = vi.fn();
+    render(<PaneHeader title="My Agent" status="Running" onClose={onClose} />);
+
+    const closeButton = screen.getByRole("button", { name: /close/i });
+    fireEvent.click(closeButton);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render a Close button when onClose is not provided", () => {
+    render(<PaneHeader title="My Agent" status="Running" />);
+    expect(screen.queryByRole("button", { name: /close/i })).toBeNull();
   });
 });

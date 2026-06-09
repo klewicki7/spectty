@@ -150,4 +150,22 @@ describe("useSession", () => {
       id: "session-1",
     });
   });
+
+  it("close() resets session and status to null so the UI is spawnable again", async () => {
+    const { result } = renderHook(() => useSession());
+
+    await act(async () => {
+      await result.current.spawn(claudeSpec, "/repo", "My Agent");
+    });
+    await waitFor(() => expect(result.current.session?.id).toBe("session-1"));
+
+    await act(async () => {
+      await result.current.close();
+    });
+
+    await waitFor(() => {
+      expect(result.current.session).toBeNull();
+      expect(result.current.status).toBeNull();
+    });
+  });
 });

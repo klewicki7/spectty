@@ -36,15 +36,23 @@ export function statusBadge(status: AgentStatus | null): StatusBadge {
 export interface PaneHeaderProps {
   title: string;
   status: AgentStatus | null;
+  /**
+   * End the active session. When provided, the header renders a Close button
+   * that invokes this callback; the header NEVER calls IPC itself (purely
+   * presentational — the parent owns `useSession.close`).
+   */
+  onClose?: () => void;
 }
 
 /**
- * The Pane header: session title + an `AgentStatus` badge. The status is supplied
- * by the parent (which owns `useSession`); the header NEVER computes it locally
- * (backend authoritative). When there is no session, both fall back to a neutral
- * "No session" state.
+ * The Pane header: session title + an `AgentStatus` badge + an optional Close
+ * button. The status is supplied by the parent (which owns `useSession`); the
+ * header NEVER computes it locally (backend authoritative). When there is no
+ * session, the title/badge fall back to a neutral "No session" state. The Close
+ * button appears only when an `onClose` handler is supplied (i.e. a session is
+ * active).
  */
-export function PaneHeader({ title, status }: PaneHeaderProps) {
+export function PaneHeader({ title, status, onClose }: PaneHeaderProps) {
   const badge = statusBadge(status);
   const displayTitle = title.length > 0 ? title : NO_SESSION_BADGE.label;
 
@@ -57,6 +65,15 @@ export function PaneHeader({ title, status }: PaneHeaderProps) {
       >
         {badge.label}
       </span>
+      {onClose ? (
+        <button
+          type="button"
+          className="pane-header__close"
+          onClick={onClose}
+        >
+          Close
+        </button>
+      ) : null}
     </header>
   );
 }

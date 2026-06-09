@@ -35,6 +35,14 @@ const claudeSpec: AgentSpec = {
   tier: "Cooperative",
 };
 
+// The Generic path carries the user-supplied command parsed into a `string[]`
+// (maps to the Rust `Option<Vec<String>>`) and the `tier: "Generic"` string.
+const genericSpec: AgentSpec = {
+  kind: "generic",
+  command: ["bash", "-l"],
+  tier: "Generic",
+};
+
 describe("session ipc command wrappers", () => {
   it("spawnSession invokes spawn_session with the agent/workspace/title/size and the output channel", async () => {
     invokeMock.mockReset();
@@ -61,6 +69,31 @@ describe("session ipc command wrappers", () => {
       rows: 24,
       onOutput: channel,
     });
+  });
+
+  it("spawnSession sends a Generic agent with a parsed command array and tier 'Generic'", async () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue("session-2");
+    const channel = { onmessage: null };
+
+    const id = await spawnSession(
+      genericSpec,
+      "/repo",
+      "Shell",
+      80,
+      24,
+      channel as never,
+    );
+
+    expect(id).toBe("session-2");
+    const call = invokeMock.mock.calls.find((c) => c[0] === "spawn_session");
+    const sentAgent = (call?.[1] as { agent: AgentSpec }).agent;
+    // Locks the `command` array shape against the Rust `Option<Vec<String>>`
+    // and the `tier: "Generic"` string.
+    expect(Array.isArray(sentAgent.command)).toBe(true);
+    expect(sentAgent.command).toEqual(["bash", "-l"]);
+    expect(sentAgent.tier).toBe("Generic");
+    expect(sentAgent.kind).toBe("generic");
   });
 
   it("closeSession invokes close_session with the bare session id", async () => {

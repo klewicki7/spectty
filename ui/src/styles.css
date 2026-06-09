@@ -47,6 +47,26 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Keep the title left while the status badge + Close button group right. */
+  margin-right: auto;
+}
+
+/* Close the active session. Purely presentational — invokes the parent's
+   `onClose` (which owns `useSession.close`); the header never calls IPC. */
+.pane-header__close {
+  padding: 2px 10px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #3a3a3a;
+  color: #d4d4d4;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pane-header__close:hover {
+  background: #4a4a4a;
+  border-color: #777;
 }
 
 /* AgentStatus badge. The `--variant` modifier keys the color; Running and
