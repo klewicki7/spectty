@@ -10,6 +10,15 @@ publish = false
 # hook command on lifecycle events (Stop, UserPromptSubmit, etc.) — NOT part of
 # the Tauri/Core graph (D25). Mirrors spectty-mcp: serde/serde_json only, never
 # depends on spectty-core, never on tauri.
+#
+# A thin [lib] target is added so the WU-9 path-agreement integration test
+# (in src-tauri/tests/) can call `spectty_hook::spectty_runtime_dir()` directly
+# alongside `spectty_lib::spectty_runtime_dir()` in ONE test — making D25 path
+# divergence impossible to land undetected.
+[lib]
+name = "spectty_hook"
+path = "src/lib.rs"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

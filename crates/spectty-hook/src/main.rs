@@ -83,9 +83,29 @@ fn drain_stdin() {
 ///
 /// Returns `Ok(())` on success, `Err(RunError)` for any non-zero-exit condition.
 /// Separated from `main` so unit tests can call it without spawning a process.
+///
+/// ## Environment variables
+///
+/// - `SPECTTY_SESSION_ID` (required): correlation key; written into the state file.
+/// - `SPECTTY_RUNTIME_DIR` (optional, DEBUG BUILDS ONLY): override the resolved
+///   runtime directory. Used by the WU-9 integration test to point the binary at
+///   a PID-unique temp dir without touching the real `~/Library/Application
+///   Support` path. Gated behind `debug_assertions` because the hook inherits the
+///   agent's full shell environment and NO reader honors this var — a leaked
+///   value in a release build would make the writer and `StateFileReader`
+///   silently diverge (the exact D25 failure WU-9 fences off). `cfg(test)` would
+///   NOT work here: the integration test spawns the compiled binary, for which
+///   `cfg(test)` is false; `debug_assertions` is true under `cargo test`/`cargo
+///   build` and false in release artifacts.
 pub(crate) fn run() -> Result<(), RunError> {
     let args = std::env::args().collect::<Vec<_>>();
     let session_id = std::env::var("SPECTTY_SESSION_ID").ok();
+    #[cfg(debug_assertions)]
+    let runtime_dir = std::env::var("SPECTTY_RUNTIME_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(spectty_runtime_dir);
+    #[cfg(not(debug_assertions))]
     let runtime_dir = spectty_runtime_dir();
     run_with(
         args.as_slice(),
