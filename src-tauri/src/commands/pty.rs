@@ -129,6 +129,8 @@ pub async fn pty_spawn(
         reader_thread: Some(reader_thread),
         // A raw PTY (no agent) injects no provisioning.
         provisioning: None,
+        hooks_handle: None,
+        state_file_path: String::new(),
     };
 
     lock_registry(&registry.0)?.insert(id.clone(), state);
@@ -383,6 +385,8 @@ mod tests {
                 stop: Arc::new(AtomicBool::new(false)),
                 reader_thread: None,
                 provisioning: None,
+                hooks_handle: None,
+                state_file_path: String::new(),
             },
         );
         (Mutex::new(map), calls)

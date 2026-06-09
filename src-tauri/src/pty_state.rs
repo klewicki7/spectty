@@ -35,10 +35,19 @@ pub struct PtyState {
     pub stop: Arc<AtomicBool>,
     /// Handle to the dedicated read thread, taken and joined on shutdown.
     pub reader_thread: Option<JoinHandle<()>>,
-    /// The provisioning handle injected at spawn for a cooperative agent (M2), so
+    /// The MCP provisioner handle injected at spawn for a cooperative agent (M2), so
     /// `close_session` can retract the EXACT scope that was injected. `None` for raw
     /// `pty_spawn` PTYs and for Generic agents (which require no provisioning).
     pub provisioning: Option<ProvisioningHandle>,
+    /// The hooks (settings.json) provisioner handle injected at spawn (WU-8, D21).
+    /// `None` for Generic agents and for raw `pty_spawn` PTYs. Retracted by
+    /// `close_session` after PTY kill and MCP retraction.
+    pub hooks_handle: Option<ProvisioningHandle>,
+    /// Absolute path to the hook state file for this session
+    /// (`{runtime_dir}/spectty-{session_id}.state`). Used by `close_session` to
+    /// delete the file and its `.tmp` twin after the session ends (WU-8, D22). Empty
+    /// string for Generic agents and for raw `pty_spawn` PTYs.
+    pub state_file_path: String,
 }
 
 impl PtyState {

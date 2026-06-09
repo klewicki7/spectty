@@ -12,9 +12,11 @@ pub mod session_runtime;
 
 use std::sync::Arc;
 
+use commands::session::HooksProvisionerState;
 use pty_state::PtyRegistry;
 use spectty_adapters::{
-    AgentRunnerRegistry, ClaudeJsonProvisioner, McpServerEntry, RealConfigFile, SystemClock,
+    AgentRunnerRegistry, ClaudeJsonProvisioner, ClaudeSettingsProvisioner, HookCommandEntry,
+    McpServerEntry, RealConfigFile, SystemClock,
 };
 use spectty_core::{ClockPort, ProvisioningPort, SessionRegistry};
 
@@ -33,6 +35,67 @@ fn spectty_mcp_command() -> String {
         .and_then(|exe| exe.parent().map(|dir| dir.join("spectty-mcp")))
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "spectty-mcp".to_string())
+}
+
+/// Resolve the path to the bundled `spectty-hook` sidecar binary.
+///
+/// Mirrors `spectty_mcp_command()` — same runtime resolution from `current_exe()`'s
+/// parent. The `ClaudeSettingsProvisioner` embeds this path in every hook command
+/// entry so the hooks invoke the REAL bundled binary at runtime.
+/// Falls back to a bare `spectty-hook` (PATH lookup) if the exe path is unavailable.
+pub(crate) fn spectty_hook_command() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("spectty-hook")))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "spectty-hook".to_string())
+}
+
+/// Resolve the Spectty sidecar runtime directory.
+///
+/// This MUST return the SAME path as `crates/spectty-hook/src/runtime_dir.rs`
+/// `spectty_runtime_dir()` — pinned by the WU-9 path-agreement integration test.
+///
+/// Formula: `{data_local_dir}/app.spectty.desktop/runtime` where `data_local_dir` is:
+/// - macOS:   `$HOME/Library/Application Support`
+/// - Linux:   `$XDG_DATA_HOME` OR `$HOME/.local/share`
+/// - Windows: `%LOCALAPPDATA%`
+///
+/// Returns empty string when the platform directory cannot be determined (e.g. `$HOME`
+/// unset). The hook reader's `poll()` silently returns `None` when the path doesn't
+/// exist, so an empty-string runtime dir is a graceful no-op.
+pub(crate) fn spectty_runtime_dir() -> String {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME").ok().map(|home| {
+        std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+    });
+
+    #[cfg(target_os = "linux")]
+    let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        Some(std::path::PathBuf::from(xdg))
+    } else {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| std::path::PathBuf::from(home).join(".local").join("share"))
+    };
+
+    #[cfg(target_os = "windows")]
+    let base = std::env::var("LOCALAPPDATA")
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let base: Option<std::path::PathBuf> = None;
+
+    base.map(|b| {
+        b.join("app.spectty.desktop")
+            .join("runtime")
+            .to_string_lossy()
+            .into_owned()
+    })
+    .unwrap_or_default()
 }
 
 /// Resolve the GLOBAL Claude config path (`~/.claude.json`) for the provisioner's
@@ -58,10 +121,40 @@ pub fn run() {
         args: vec!["--stdio".to_string()],
         env: vec![],
     };
-    let provisioner: Arc<dyn ProvisioningPort> = Arc::new(ClaudeJsonProvisioner::new(
+    let mcp_provisioner: Arc<dyn ProvisioningPort> = Arc::new(ClaudeJsonProvisioner::new(
         RealConfigFile,
         home_claude_json(),
         mcp_entry,
+    ));
+
+    // The hooks provisioner injects the Spectty hook entries into
+    // `~/.claude/settings.json` (Global) / `.claude/settings.json` (Project). Only
+    // Slice 1 events (Stop + UserPromptSubmit) are wired here — Slice 2 extends the
+    // list in WU-10. Managed as `HooksProvisionerState` (distinct Tauri state type) so
+    // it does not collide with `Arc<dyn ProvisioningPort>` (D21).
+    let hook_cmd = spectty_hook_command();
+    let hooks_events: Vec<(String, HookCommandEntry, Option<String>)> = vec![
+        (
+            "UserPromptSubmit".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.clone(),
+                args: vec!["--event".to_string(), "Submit".to_string()],
+            },
+            None,
+        ),
+        (
+            "Stop".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.clone(),
+                args: vec!["--event".to_string(), "Stop".to_string()],
+            },
+            None,
+        ),
+    ];
+    let hooks_provisioner: Arc<dyn ProvisioningPort> = Arc::new(ClaudeSettingsProvisioner::new(
+        RealConfigFile,
+        hook_cmd,
+        hooks_events,
     ));
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
 
@@ -75,9 +168,11 @@ pub fn run() {
         // String→runner resolver (D12): `claude-code` (cooperative, provisioned) +
         // `generic` (idle-timeout, no provisioning).
         .manage(AgentRunnerRegistry::with_builtin())
-        // The provisioning + clock ports as `Arc<dyn _>` (the EXACT managed types the
-        // session commands' `State<Arc<dyn _>>` resolve — no state-type mismatch).
-        .manage(provisioner)
+        // The MCP provisioner as `Arc<dyn ProvisioningPort>` (the EXACT managed type the
+        // session commands' `State<Arc<dyn ProvisioningPort>>` resolves).
+        .manage(mcp_provisioner)
+        // The hooks provisioner as `HooksProvisionerState` (distinct state type — D21).
+        .manage(HooksProvisionerState(hooks_provisioner))
         .manage(clock)
         .invoke_handler(tauri::generate_handler![
             commands::ping::ping,
