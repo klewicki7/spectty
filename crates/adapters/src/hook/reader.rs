@@ -139,7 +139,10 @@ mod tests {
         // Now present ts=3 (older) → must NOT fire.
         let json_ts3 = r#"{"event":"Submit","ts":3,"session_id":"session-1"}"#;
         let result = reader.poll(&fixed_reader(json_ts3));
-        assert_eq!(result, None, "older ts must not re-fire (stale/rewound file)");
+        assert_eq!(
+            result, None,
+            "older ts must not re-fire (stale/rewound file)"
+        );
     }
 
     #[test]
@@ -179,7 +182,10 @@ mod tests {
 
         // Present the SAME ts=5 again.
         let result = reader.poll(&fixed_reader(json_ts5));
-        assert_eq!(result, None, "ts == last_ts must NOT re-fire (strict-greater)");
+        assert_eq!(
+            result, None,
+            "ts == last_ts must NOT re-fire (strict-greater)"
+        );
     }
 
     /// Dynamic `read` closure that returns a sequence of JSON strings. Used to
@@ -202,8 +208,8 @@ mod tests {
 
         let mut reader = StateFileReader::new("/tmp", "s1");
         assert_eq!(reader.poll(&read_fn), Some(HookEvent::Submit)); // ts=1 fires
-        assert_eq!(reader.poll(&read_fn), None);                    // ts=1 again → None
-        assert_eq!(reader.poll(&read_fn), Some(HookEvent::Stop));   // ts=2 fires
+        assert_eq!(reader.poll(&read_fn), None); // ts=1 again → None
+        assert_eq!(reader.poll(&read_fn), Some(HookEvent::Stop)); // ts=2 fires
     }
 
     // ── C2 RED TESTS: session_id correlation (D23) ────────────────────────────

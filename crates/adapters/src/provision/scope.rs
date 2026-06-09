@@ -99,9 +99,21 @@ mod tests {
         let global = settings_path_for_scope(&ProvisioningScope::Global);
         let project = settings_path_for_scope(&ProvisioningScope::Project("/repo".to_string()));
 
-        assert_ne!(global, "~/.claude.json", "must be settings.json not .claude.json");
-        assert_ne!(project, "/repo/.mcp.json", "must be settings.json not .mcp.json");
-        assert!(global.ends_with("settings.json"), "global path ends with settings.json");
-        assert!(project.ends_with("settings.json"), "project path ends with settings.json");
+        assert_ne!(
+            global, "~/.claude.json",
+            "must be settings.json not .claude.json"
+        );
+        assert_ne!(
+            project, "/repo/.mcp.json",
+            "must be settings.json not .mcp.json"
+        );
+        assert!(
+            global.ends_with("settings.json"),
+            "global path ends with settings.json"
+        );
+        assert!(
+            project.ends_with("settings.json"),
+            "project path ends with settings.json"
+        );
     }
 }

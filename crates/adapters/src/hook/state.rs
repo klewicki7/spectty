@@ -180,7 +180,10 @@ mod tests {
 
     #[test]
     fn event_to_observed_permission_maps_to_needs_input() {
-        assert_eq!(event_to_observed(HookEvent::Permission), Observed::NeedsInput);
+        assert_eq!(
+            event_to_observed(HookEvent::Permission),
+            Observed::NeedsInput
+        );
     }
 
     #[test]

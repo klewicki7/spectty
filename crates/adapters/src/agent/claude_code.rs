@@ -212,8 +212,7 @@ mod tests {
         // spinner line animates (bytes keep arriving → is_active). The shared
         // footer must NOT be read as Ready while the agent is actively working.
         let runner = ClaudeCodeRunner::new();
-        let window =
-            "Tomfoolering… (2s · thinking)\nbypass permissions on (shift+tab to cycle)";
+        let window = "Tomfoolering… (2s · thinking)\nbypass permissions on (shift+tab to cycle)";
         assert_eq!(
             runner.detect_status(&signal(window, true, None)),
             Some(Observed::Working)

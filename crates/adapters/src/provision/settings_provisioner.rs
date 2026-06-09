@@ -128,7 +128,11 @@ mod tests {
         let p = provisioner_with_fake(FakeConfigFile::with_file(path, "{}"));
 
         let handle = p.inject(ProvisioningScope::Global).expect("inject ok");
-        assert_eq!(handle.scope, ProvisioningScope::Global, "handle carries scope");
+        assert_eq!(
+            handle.scope,
+            ProvisioningScope::Global,
+            "handle carries scope"
+        );
 
         let current = p.files.read(path).expect("read").expect("present");
         let parsed: serde_json::Value =
@@ -249,12 +253,18 @@ mod tests {
                 arr.iter().any(|el| {
                     el.get("hooks")
                         .and_then(serde_json::Value::as_array)
-                        .map(|h| h.iter().any(|inner| inner["command"] == "/usr/local/bin/user-notify"))
+                        .map(|h| {
+                            h.iter()
+                                .any(|inner| inner["command"] == "/usr/local/bin/user-notify")
+                        })
                         .unwrap_or(false)
                 })
             })
             .unwrap_or(false);
-        assert!(foreign_present, "foreign user hook on Stop must survive retract");
+        assert!(
+            foreign_present,
+            "foreign user hook on Stop must survive retract"
+        );
     }
 
     #[test]
@@ -286,7 +296,10 @@ mod tests {
             let has_spectty = stop_arr.iter().any(|el| {
                 el.get("hooks")
                     .and_then(serde_json::Value::as_array)
-                    .map(|h| h.iter().any(|inner| inner["command"] == "/usr/local/bin/spectty-hook"))
+                    .map(|h| {
+                        h.iter()
+                            .any(|inner| inner["command"] == "/usr/local/bin/spectty-hook")
+                    })
                     .unwrap_or(false)
             });
             assert!(!has_spectty, "no Spectty row in Stop array after retract");

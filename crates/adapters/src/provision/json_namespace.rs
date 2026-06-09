@@ -195,9 +195,9 @@ pub fn inject_spectty_hooks(
         let event_array = hooks_map
             .entry(event_name.clone())
             .or_insert_with(|| Value::Array(vec![]));
-        let event_array = event_array
-            .as_array_mut()
-            .ok_or_else(|| ProvisioningError::Parse(format!("`hooks.{event_name}` is not an array")))?;
+        let event_array = event_array.as_array_mut().ok_or_else(|| {
+            ProvisioningError::Parse(format!("`hooks.{event_name}` is not an array"))
+        })?;
 
         // Remove any existing Spectty-owned inner commands at fine-grained level,
         // then drop the outer element only if its hooks[] array becomes empty.
@@ -559,9 +559,7 @@ mod tests {
         let original = hand_formatted_settings();
         let original_value: Value = serde_json::from_str(original).expect("valid input");
 
-        let events = vec![
-            ("Stop".to_string(), hook_entry_stop(), None),
-        ];
+        let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
         let injected = inject_spectty_hooks(original, &events).expect("inject ok");
         let injected_value: Value = serde_json::from_str(&injected).expect("valid after inject");
 
@@ -573,9 +571,8 @@ mod tests {
             el.get("hooks")
                 .and_then(Value::as_array)
                 .map(|h| {
-                    h.iter().any(|inner| {
-                        inner["command"] == "/usr/local/bin/spectty-hook"
-                    })
+                    h.iter()
+                        .any(|inner| inner["command"] == "/usr/local/bin/spectty-hook")
                 })
                 .unwrap_or(false)
         });
@@ -586,9 +583,8 @@ mod tests {
             el.get("hooks")
                 .and_then(Value::as_array)
                 .map(|h| {
-                    h.iter().any(|inner| {
-                        inner["command"] == "/usr/local/bin/user-notify"
-                    })
+                    h.iter()
+                        .any(|inner| inner["command"] == "/usr/local/bin/user-notify")
                 })
                 .unwrap_or(false)
         });
@@ -598,31 +594,41 @@ mod tests {
         );
 
         // Retract.
-        let retracted = retract_spectty_hooks(&injected, "/usr/local/bin/spectty-hook")
-            .expect("retract ok");
+        let retracted =
+            retract_spectty_hooks(&injected, "/usr/local/bin/spectty-hook").expect("retract ok");
         let retracted_value: Value = serde_json::from_str(&retracted).expect("valid after retract");
 
         // No Spectty row remains after retract.
         let spectty_remains = retracted_value["hooks"]["Stop"]
             .as_array()
-            .map(|arr| arr.iter().any(|el| {
-                el.get("hooks")
-                    .and_then(Value::as_array)
-                    .map(|h| h.iter().any(|inner| inner["command"] == "/usr/local/bin/spectty-hook"))
-                    .unwrap_or(false)
-            }))
+            .map(|arr| {
+                arr.iter().any(|el| {
+                    el.get("hooks")
+                        .and_then(Value::as_array)
+                        .map(|h| {
+                            h.iter()
+                                .any(|inner| inner["command"] == "/usr/local/bin/spectty-hook")
+                        })
+                        .unwrap_or(false)
+                })
+            })
             .unwrap_or(false);
         assert!(!spectty_remains, "no Spectty row remains after retract");
 
         // The foreign Stop hook is back, value unchanged.
         let foreign_after_retract = retracted_value["hooks"]["Stop"]
             .as_array()
-            .map(|arr| arr.iter().any(|el| {
-                el.get("hooks")
-                    .and_then(Value::as_array)
-                    .map(|h| h.iter().any(|inner| inner["command"] == "/usr/local/bin/user-notify"))
-                    .unwrap_or(false)
-            }))
+            .map(|arr| {
+                arr.iter().any(|el| {
+                    el.get("hooks")
+                        .and_then(Value::as_array)
+                        .map(|h| {
+                            h.iter()
+                                .any(|inner| inner["command"] == "/usr/local/bin/user-notify")
+                        })
+                        .unwrap_or(false)
+                })
+            })
             .unwrap_or(false);
         assert!(
             foreign_after_retract,
@@ -631,8 +637,7 @@ mod tests {
 
         // Foreign Stop hook VALUE matches the original.
         assert_eq!(
-            retracted_value["hooks"]["Stop"],
-            original_value["hooks"]["Stop"],
+            retracted_value["hooks"]["Stop"], original_value["hooks"]["Stop"],
             "foreign Stop hook value round-trips byte-meaningfully"
         );
 
@@ -646,8 +651,7 @@ mod tests {
 
         // PreToolUse hook survives.
         assert_eq!(
-            retracted_value["hooks"]["PreToolUse"],
-            original_value["hooks"]["PreToolUse"],
+            retracted_value["hooks"]["PreToolUse"], original_value["hooks"]["PreToolUse"],
             "foreign PreToolUse hook survives"
         );
 
@@ -662,9 +666,7 @@ mod tests {
 
     #[test]
     fn hooks_inject_is_idempotent() {
-        let events = vec![
-            ("Stop".to_string(), hook_entry_stop(), None),
-        ];
+        let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
         let once = inject_spectty_hooks("{}", &events).expect("inject 1");
         let twice = inject_spectty_hooks(&once, &events).expect("inject 2");
         let once_value: Value = serde_json::from_str(&once).expect("valid");
@@ -704,8 +706,8 @@ mod tests {
         }))
         .expect("fixture");
 
-        let retracted =
-            retract_spectty_hooks(&no_hooks, "/usr/local/bin/spectty-hook").expect("retract absent");
+        let retracted = retract_spectty_hooks(&no_hooks, "/usr/local/bin/spectty-hook")
+            .expect("retract absent");
         // Value must be unchanged (modulo canonical reserialize).
         let orig_v: Value = serde_json::from_str(&no_hooks).expect("valid");
         let ret_v: Value = serde_json::from_str(&retracted).expect("valid");
@@ -816,7 +818,8 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(|h| {
                     h.iter().any(|inner| {
-                        inner.get("command")
+                        inner
+                            .get("command")
                             .and_then(Value::as_str)
                             .map(|c| c == "/usr/local/bin/user-notify")
                             .unwrap_or(false)
@@ -835,7 +838,8 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(|h| {
                     h.iter().all(|inner| {
-                        inner.get("command")
+                        inner
+                            .get("command")
                             .and_then(Value::as_str)
                             .map(|c| c != "/usr/local/bin/spectty-hook")
                             .unwrap_or(true)
@@ -882,7 +886,8 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(|h| {
                     h.iter().any(|inner| {
-                        inner.get("command")
+                        inner
+                            .get("command")
                             .and_then(Value::as_str)
                             .map(|c| c == "/usr/local/bin/user-notify")
                             .unwrap_or(false)

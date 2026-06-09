@@ -89,6 +89,10 @@ WU-1 (manifests) ─────────────────────
   `"binaries/spectty-mcp"` AND `"binaries/spectty-hook"` (target-triple-suffixed per Tauri sidecar
   convention). This closes M2 L2 for spectty-mcp and establishes bundling for spectty-hook.
   `[REQ:bundling/externalBin → Scenario: tauri.conf.json contains both sidecar entries]` `[ci]` `[D25]`
+  **DEFERRED (adversarial review W3)**: sidecar bundling (`externalBin` + real per-triple binaries
+  generated in CI) is out of WU-4 scope. Empty committed stubs were a footgun (0-byte files, only one
+  target triple, clobber real local builds on checkout). Reverted in fix(spectty-hook): C1/W1/W3/W4.
+  This task belongs in a dedicated packaging work unit, not WU-4.
 - [x] 1.4 Confirm `crates/core/Cargo.toml` runtime deps UNCHANGED (serde + thiserror only).
   `[REQ:hook-provisioning/ClaudeSettingsProvisioner — CORE UNCHANGED]` `[ci]` `[D21]`
 - [x] **Gate (WU-1)**: `cargo build --workspace` succeeds (empty spectty-hook main stub OK);
@@ -222,34 +226,34 @@ with WU-2 and WU-3.** **Blocks**: WU-9 (integration test spawns the built binary
 > (Submit/Stop/Permission/SessionEnd/StopFailure). This is what the hooks injected by
 > ClaudeSettingsProvisioner will pass via `args: ["--event", "<Name>"]`.
 
-- [ ] 4.1 RED: `spectty_hook_handle_event_writes_state_file` (pure handler test, no process) —
+- [x] 4.1 RED: `spectty_hook_handle_event_writes_state_file` (pure handler test, no process) —
   call the pure `handle_event(event, session_id, read_prior, write_atomic)` with a fake read
   returning `Some(ts=6)` → write receives `{event:Stop, ts:7, session_id}`. Absent prior file
   (None) → ts=1. `[REQ:spectty-hook-sidecar/atomic-write → Scenario: spectty-hook writes a
   valid state file from env + args]` `[unit]`
-- [ ] 4.2 RED: `spectty_hook_unknown_event_returns_error` — handler called with an unrecognized
+- [x] 4.2 RED: `spectty_hook_unknown_event_returns_error` — handler called with an unrecognized
   event name string → `Err` (maps to non-zero exit in main). `[REQ:spectty-hook-sidecar/atomic-write
   → Scenario: spectty-hook with unknown status arg exits non-zero]` `[unit]`
-- [ ] 4.3 RED: `spectty_hook_rejects_missing_session_id` — absent `SPECTTY_SESSION_ID` → main
+- [x] 4.3 RED: `spectty_hook_rejects_missing_session_id` — absent `SPECTTY_SESSION_ID` → main
   exits non-zero without writing. `[REQ:spectty-hook-sidecar/atomic-write → Scenario: spectty-hook
   exits non-zero when SPECTTY_SESSION_ID is absent]` `[unit]`
-- [ ] 4.4 RED: `spectty_hook_rejects_missing_runtime_dir` — non-existent runtime dir →
+- [x] 4.4 RED: `spectty_hook_rejects_missing_runtime_dir` — non-existent runtime dir →
   non-zero exit. `[REQ:spectty-hook-sidecar/atomic-write → Scenario: spectty-hook exits non-zero
   when the runtime dir does not exist]` `[unit]`
-- [ ] 4.5 RED: `spectty_hook_accepts_all_five_event_names` — table test: Submit, Stop,
+- [x] 4.5 RED: `spectty_hook_accepts_all_five_event_names` — table test: Submit, Stop,
   Permission, SessionEnd, StopFailure each produce a valid write call (no error). `[REQ:spectty-hook-sidecar/five-valid-events
   → Scenario: Each valid status value writes a state file]` `[unit]`
-- [ ] 4.6 GREEN: create `crates/spectty-hook/src/runtime_dir.rs` — `fn spectty_runtime_dir()
+- [x] 4.6 GREEN: create `crates/spectty-hook/src/runtime_dir.rs` — `fn spectty_runtime_dir()
   -> Option<PathBuf>` (~10-line duplicate of src-tauri's resolver, D25): resolves to a
   Spectty-specific subdirectory under the OS app-local-data dir (must match src-tauri's
   `spectty_runtime_dir()` exactly — pinned by WU-9.1 integration test).
-- [ ] 4.7 GREEN: create `crates/spectty-hook/src/main.rs` — parse `--event <Name>` arg;
+- [x] 4.7 GREEN: create `crates/spectty-hook/src/main.rs` — parse `--event <Name>` arg;
   read `SPECTTY_SESSION_ID` env (exit non-zero if absent); resolve `spectty_runtime_dir()` (exit
   non-zero if absent); call `handle_event(event, session_id, read_prior, write_atomic)`; drain
   and ignore stdin (Claude passes hook JSON); exit 0 on success, non-zero on error.
   serde/serde_json only — NO spectty-core, NO tauri (D25). `[REQ:spectty-hook-sidecar/atomic-write]`
   `[unit]` `[D23][D25]`
-- [ ] **Gate (WU-4)**: `cargo test --workspace` green (handler unit tests); fmt/clippy clean;
+- [x] **Gate (WU-4)**: `cargo test --workspace` green (handler unit tests); fmt/clippy clean;
   `cargo build -p spectty-hook` produces the binary.
 
 ---
