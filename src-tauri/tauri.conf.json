@@ -7,7 +7,7 @@
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "pnpm --filter ui dev",
-    "beforeBuildCommand": "pnpm --filter ui build"
+    "beforeBuildCommand": "bash scripts/build-sidecars.sh && pnpm --filter ui build"
   },
   "app": {
     "windows": [
