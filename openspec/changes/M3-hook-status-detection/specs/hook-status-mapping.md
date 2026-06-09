@@ -48,6 +48,15 @@ status strings to `Observed` variants. Unrecognized strings MUST map to `None`.
 - **When** it is called with `"Failed"`
 - **Then** it MUST return `Some(Observed::Failed)`
 
+> **DEVIATION (PR-4)**: The `StopFailure` / `"Failed"` scenario is spec-conformant at the
+> mapping level (`HookEvent::StopFailure → Observed::Failed` is implemented and tested), but
+> the corresponding Claude Code hook (`SubagentStop`) is **not** registered in the production
+> event list. `SubagentStop` fires on every subagent completion (success AND failure) with no
+> failure discriminator in the payload; registering it would drive healthy sessions to `Error`.
+> The `StopFailure` hook source is deferred until Claude Code exposes a failure-discriminating
+> event. `Error` remains reachable via non-hook paths. This scenario documents the INTENDED
+> eventual behaviour; implementation of the hook registration is a future work item.
+
 #### Scenario: An unrecognized status string maps to None
 - **Given** the hook-status mapping function
 - **When** it is called with any string not in the five locked values

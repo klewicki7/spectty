@@ -769,6 +769,87 @@ mod tests {
         assert!(matches!(err, ProvisioningError::Parse(_)));
     }
 
+    // ── WU-10.2 RED: Notification entry uses PERMISSION_PROMPT_MATCHER ────────
+    //
+    // Calls inject_spectty_hooks with the production 4-event shape (Slice 1 +
+    // Slice 2 minus SubagentStop/StopFailure, which was deferred in PR-4 — see
+    // lib.rs `production_hook_events` doc), inspects the Notification entry in the
+    // output, and asserts its matcher field equals the PERMISSION_PROMPT_MATCHER
+    // constant.
+    //
+    // S1 FIX (PR-4): the original test used a 5-event list with two "Stop" rows
+    // (Stop + StopFailure under "Stop") which was never a valid production shape.
+    // Updated to mirror the actual production list: UserPromptSubmit, Stop,
+    // Notification+matcher, SessionEnd.
+    //
+    // [REQ:hook-status-mapping/hook-event-shape → Scenario: Notification event has
+    // a permission-prompt matcher]
+    #[test]
+    fn inject_spectty_hooks_notification_entry_has_permission_matcher() {
+        use crate::hook::state::PERMISSION_PROMPT_MATCHER;
+
+        let hook_cmd = "/usr/local/bin/spectty-hook".to_string();
+        // Production 4-event shape (matches lib.rs `production_hook_events`).
+        let production_events = vec![
+            (
+                "UserPromptSubmit".to_string(),
+                HookCommandEntry {
+                    command: hook_cmd.clone(),
+                    args: vec!["--event".to_string(), "Submit".to_string()],
+                },
+                None,
+            ),
+            (
+                "Stop".to_string(),
+                HookCommandEntry {
+                    command: hook_cmd.clone(),
+                    args: vec!["--event".to_string(), "Stop".to_string()],
+                },
+                None,
+            ),
+            (
+                "Notification".to_string(),
+                HookCommandEntry {
+                    command: hook_cmd.clone(),
+                    args: vec!["--event".to_string(), "Permission".to_string()],
+                },
+                Some(PERMISSION_PROMPT_MATCHER.to_string()),
+            ),
+            (
+                "SessionEnd".to_string(),
+                HookCommandEntry {
+                    command: hook_cmd.clone(),
+                    args: vec!["--event".to_string(), "SessionEnd".to_string()],
+                },
+                None,
+            ),
+            // SubagentStop/StopFailure intentionally absent — deferred in PR-4.
+        ];
+
+        let injected = inject_spectty_hooks("{}", &production_events).expect("inject ok");
+        let parsed: serde_json::Value = serde_json::from_str(&injected).expect("valid JSON");
+
+        // The Notification entry MUST have a matcher field.
+        let notif_entries = parsed["hooks"]["Notification"]
+            .as_array()
+            .expect("Notification event must be present in injected JSON");
+        assert!(
+            !notif_entries.is_empty(),
+            "Notification array must not be empty"
+        );
+
+        let notif_entry = &notif_entries[0];
+        let matcher = notif_entry
+            .get("matcher")
+            .and_then(serde_json::Value::as_str)
+            .expect("Notification entry MUST have a matcher field");
+
+        assert_eq!(
+            matcher, PERMISSION_PROMPT_MATCHER,
+            "Notification matcher must equal PERMISSION_PROMPT_MATCHER ({PERMISSION_PROMPT_MATCHER:?})"
+        );
+    }
+
     // ── C1 RED TEST: retract must operate at inner-command granularity ─────────
     //
     // When a user's notifier and the spectty-hook share ONE outer matcher-group

@@ -11,4 +11,6 @@ pub mod reader;
 pub mod state;
 
 pub use reader::StateFileReader;
-pub use state::{event_to_observed, parse_state_file, HookEvent, HookState};
+pub use state::{
+    event_to_observed, parse_state_file, HookEvent, HookState, PERMISSION_PROMPT_MATCHER,
+};

@@ -14,6 +14,18 @@
 use serde::Deserialize;
 use spectty_core::{Observed, ProvisioningError};
 
+/// The `matcher` value Spectty registers on the Claude Code `Notification` hook to
+/// capture only permission-request prompts (Slice 2, D21).
+///
+/// Sourced from the Claude Code Notification Hook Event docs
+/// (<https://code.claude.com/docs/en/hooks>): permission-request notifications carry
+/// `notification_type == "permission_prompt"`. Claude Code's hook `matcher` field
+/// filters on this string so only permission prompts invoke the sidecar; unrelated
+/// notifications (info banners, etc.) do NOT fire the hook.
+///
+/// This is an EMPIRICAL adapter-level constant — it MUST NOT live in `crates/core`.
+pub const PERMISSION_PROMPT_MATCHER: &str = "permission_prompt";
+
 /// Lifecycle events the Spectty hook sidecar can report.
 ///
 /// Variant names match the `--event <Name>` CLI argument and the `"event"` field in

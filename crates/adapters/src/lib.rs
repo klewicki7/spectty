@@ -15,7 +15,10 @@ pub mod pty;
 
 pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSignalProducer};
 pub use clock::SystemClock;
-pub use hook::{event_to_observed, parse_state_file, HookEvent, HookState, StateFileReader};
+pub use hook::{
+    event_to_observed, parse_state_file, HookEvent, HookState, StateFileReader,
+    PERMISSION_PROMPT_MATCHER,
+};
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
 pub use provision::{
     inject_spectty_hooks, inject_spectty_mcp, is_git_tracked, resolve_scope, retract_spectty_hooks,

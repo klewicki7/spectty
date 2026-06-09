@@ -16,7 +16,7 @@ use commands::session::HooksProvisionerState;
 use pty_state::PtyRegistry;
 use spectty_adapters::{
     AgentRunnerRegistry, ClaudeJsonProvisioner, ClaudeSettingsProvisioner, HookCommandEntry,
-    McpServerEntry, RealConfigFile, SystemClock,
+    McpServerEntry, RealConfigFile, SystemClock, PERMISSION_PROMPT_MATCHER,
 };
 use spectty_core::{ClockPort, ProvisioningPort, SessionRegistry};
 
@@ -101,6 +101,75 @@ pub fn spectty_runtime_dir() -> String {
     .unwrap_or_default()
 }
 
+/// Build the production hook event list registered with `ClaudeSettingsProvisioner`.
+///
+/// # Why exactly 4 events (NOT 5)
+///
+/// The original Slice 2 implementation registered a 5th entry using Claude Code's
+/// `SubagentStop` hook to drive `StopFailure → Failed → Error`. This was WRONG:
+///
+/// Per the official Claude Code hook documentation, `SubagentStop` fires whenever
+/// **any** subagent finishes — success OR failure. Its payload carries no failure
+/// discriminator. Our sidecar drains-and-ignores stdin by design (D23), so it cannot
+/// inspect the payload to distinguish a failed subagent from a successful one.
+/// Wiring `SubagentStop → StopFailure → Failed → Error` would flip every healthy
+/// session to `Error` on normal agentic work (e.g. every tool-call subagent completing).
+///
+/// **DEVIATION (PR-4)**: `StopFailure` has no reliable hook source in Slice 2.
+/// The `SubagentStop` entry is removed from the production event list. `Error` remains
+/// reachable via non-hook paths (future work when Claude Code exposes a
+/// failure-discriminating event, or via a scraping/exit-code heuristic). The
+/// `HookEvent::StopFailure` enum variant, its `event_to_observed` mapping, its
+/// `parse_state_file` name, and the sidecar's `--event StopFailure` acceptance are
+/// all kept as-is (already on main since PR-1b; harmless, forward-compatible).
+///
+/// Production list: UserPromptSubmit + Stop + Notification(permission_prompt) + SessionEnd.
+pub(crate) fn production_hook_events(
+    hook_cmd: &str,
+) -> Vec<(String, HookCommandEntry, Option<String>)> {
+    vec![
+        // ── Slice 1 ──────────────────────────────────────────────────────────────
+        (
+            "UserPromptSubmit".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.to_string(),
+                args: vec!["--event".to_string(), "Submit".to_string()],
+            },
+            None,
+        ),
+        (
+            "Stop".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.to_string(),
+                args: vec!["--event".to_string(), "Stop".to_string()],
+            },
+            None,
+        ),
+        // ── Slice 2 ──────────────────────────────────────────────────────────────
+        (
+            // Permission prompt: Claude's `Notification` hook with the empirical
+            // `permission_prompt` matcher so ONLY permission-request notifications
+            // invoke the sidecar (unrelated notifications are filtered out).
+            "Notification".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.to_string(),
+                args: vec!["--event".to_string(), "Permission".to_string()],
+            },
+            Some(PERMISSION_PROMPT_MATCHER.to_string()),
+        ),
+        (
+            // Session end: Claude's `SessionEnd` hook; no matcher needed.
+            "SessionEnd".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.to_string(),
+                args: vec!["--event".to_string(), "SessionEnd".to_string()],
+            },
+            None,
+        ),
+        // NOTE: SubagentStop/StopFailure is intentionally absent — see fn doc above.
+    ]
+}
+
 /// Resolve the GLOBAL Claude config path (`~/.claude.json`) for the provisioner's
 /// default scope. Falls back to a bare `.claude.json` when `$HOME` is unset.
 fn home_claude_json() -> String {
@@ -131,29 +200,14 @@ pub fn run() {
     ));
 
     // The hooks provisioner injects the Spectty hook entries into
-    // `~/.claude/settings.json` (Global) / `.claude/settings.json` (Project). Only
-    // Slice 1 events (Stop + UserPromptSubmit) are wired here — Slice 2 extends the
-    // list in WU-10. Managed as `HooksProvisionerState` (distinct Tauri state type) so
-    // it does not collide with `Arc<dyn ProvisioningPort>` (D21).
+    // `~/.claude/settings.json` (Global) / `.claude/settings.json` (Project). The
+    // production event list is built by `production_hook_events()` — see its doc comment
+    // and the associated unit test for the authoritative list and rationale.
+    //
+    // Managed as `HooksProvisionerState` (distinct Tauri state type) so it does not
+    // collide with `Arc<dyn ProvisioningPort>` (D21).
     let hook_cmd = spectty_hook_command();
-    let hooks_events: Vec<(String, HookCommandEntry, Option<String>)> = vec![
-        (
-            "UserPromptSubmit".to_string(),
-            HookCommandEntry {
-                command: hook_cmd.clone(),
-                args: vec!["--event".to_string(), "Submit".to_string()],
-            },
-            None,
-        ),
-        (
-            "Stop".to_string(),
-            HookCommandEntry {
-                command: hook_cmd.clone(),
-                args: vec!["--event".to_string(), "Stop".to_string()],
-            },
-            None,
-        ),
-    ];
+    let hooks_events = production_hook_events(&hook_cmd);
     let hooks_provisioner: Arc<dyn ProvisioningPort> = Arc::new(ClaudeSettingsProvisioner::new(
         RealConfigFile,
         hook_cmd,
@@ -190,4 +244,61 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running spectty application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── C1 REGRESSION PIN ────────────────────────────────────────────────────
+    //
+    // DEVIATION (PR-4): SubagentStop was removed from the production event list.
+    //
+    // WHY: Claude Code's `SubagentStop` hook fires whenever ANY subagent finishes —
+    // success OR failure. Its payload has NO failure discriminator, and our sidecar
+    // drains-and-ignores stdin by design (D23). Wiring SubagentStop → StopFailure →
+    // Failed → Error would flip every healthy session to Error on normal agentic work.
+    // `StopFailure` has no reliable hook source in Slice 2; it is deferred until Claude
+    // Code exposes a failure-discriminating event. `Error` remains reachable via
+    // non-hook paths.
+    //
+    // RED evidence: before this PR the event list had 5 entries including a
+    // ("SubagentStop", …, None) row; this test would have failed on the `len()==4`
+    // assertion AND on the `no_subagent_stop` assertion.
+    #[test]
+    fn production_event_list_excludes_subagent_stop_and_has_exactly_four_entries() {
+        let events = production_hook_events("/path/to/spectty-hook");
+
+        // Must have exactly 4 entries: UserPromptSubmit, Stop, Notification, SessionEnd.
+        assert_eq!(
+            events.len(),
+            4,
+            "production hook event list must contain exactly 4 entries \
+             (UserPromptSubmit + Stop + Notification + SessionEnd); \
+             SubagentStop is deferred — see production_hook_events doc"
+        );
+
+        // None of the entries may use the SubagentStop Claude hook name.
+        let has_subagent_stop = events.iter().any(|(name, _, _)| name == "SubagentStop");
+        assert!(
+            !has_subagent_stop,
+            "SubagentStop MUST NOT be in the production event list: \
+             the hook fires on every subagent completion (success AND failure); \
+             no failure discriminator is available in the hook payload; \
+             wiring it would flip healthy sessions to Error"
+        );
+
+        // Positive check: the four expected Claude hook names are present.
+        let names: Vec<&str> = events.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"UserPromptSubmit"),
+            "UserPromptSubmit must be present"
+        );
+        assert!(names.contains(&"Stop"), "Stop must be present");
+        assert!(
+            names.contains(&"Notification"),
+            "Notification must be present"
+        );
+        assert!(names.contains(&"SessionEnd"), "SessionEnd must be present");
+    }
 }
