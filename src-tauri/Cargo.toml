@@ -30,3 +30,13 @@ serde = { workspace = true }
 # and the real-PTY integration test drive PtyAdapter against an actual pty. Core
 # stays clean — this dependency never reaches spectty-core.
 portable-pty = "0.9.0"
+
+[dev-dependencies]
+# WU-9 path-agreement integration test: calls spectty_hook::spectty_runtime_dir()
+# alongside spectty_lib::spectty_runtime_dir() in ONE test. A test-only dep on the
+# thin [lib] target of spectty-hook (serde/serde_json only — no tauri, no core).
+# This makes D25 path divergence IMPOSSIBLE to land undetected.
+spectty-hook = { path = "../crates/spectty-hook" }
+# serde_json used in integration tests to parse the state file written by the
+# spectty-hook binary.
+serde_json = { workspace = true }

@@ -64,7 +64,10 @@ pub(crate) fn spectty_hook_command() -> String {
 /// Returns empty string when the platform directory cannot be determined (e.g. `$HOME`
 /// unset). The hook reader's `poll()` silently returns `None` when the path doesn't
 /// exist, so an empty-string runtime dir is a graceful no-op.
-pub(crate) fn spectty_runtime_dir() -> String {
+/// Public visibility is required so the WU-9 path-agreement integration test
+/// in `src-tauri/tests/hook_integration.rs` can compare this against
+/// `spectty_hook::spectty_runtime_dir()` in one call site (D25 pin).
+pub fn spectty_runtime_dir() -> String {
     #[cfg(target_os = "macos")]
     let base = std::env::var("HOME").ok().map(|home| {
         std::path::PathBuf::from(home)

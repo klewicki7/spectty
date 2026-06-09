@@ -2906,8 +2906,10 @@ version = "0.0.0"
 dependencies = [
  "portable-pty",
  "serde",
+ "serde_json",
  "spectty-adapters",
  "spectty-core",
+ "spectty-hook",
  "tauri",
  "tauri-build",
  "tokio",

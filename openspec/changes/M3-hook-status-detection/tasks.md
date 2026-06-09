@@ -489,7 +489,7 @@ stale-state-file-deleted-before-loop.
 **Rollback**: revert → lose the integration floor; unit gates still hold.
 **PR slice**: PR-3 (Slice 1 close; real-PTY lives with src-tauri, path-agreement with spectty-hook).
 
-- [ ] 9.1 `#[cfg(unix)]` `spectty_hook_end_to_end_monotonic_ts_and_path_agreement` — integration
+- [x] 9.1 `#[cfg(unix)]` `spectty_hook_end_to_end_monotonic_ts_and_path_agreement` — integration
   test asserting ALL of:
   (a) spawn the built `spectty-hook --event Stop` binary in a temp dir with
       `SPECTTY_SESSION_ID=itest`; assert `.state` parses to `{Stop, ts:1, "itest"}`;
@@ -498,12 +498,15 @@ stale-state-file-deleted-before-loop.
       `crates/spectty-hook/src/runtime_dir.rs`'s `spectty_runtime_dir()` resolve to the SAME path
       (D25 path agreement — this is a LOAD-BEARING test; silent divergence would mean status
       never updates). `[REQ:pipeline-augmentation/run_signal_loop]` `[unit/ci]` `[D22][D25]`
-- [ ] 9.2 `#[cfg(unix)]` `real_pty_hook_sourced_stop_emits_idle` — write a `.state` file
+  Lives in `src-tauri/tests/hook_integration.rs`; spectty-hook gets thin [lib] target
+  + spectty_lib::spectty_runtime_dir() made pub; SPECTTY_RUNTIME_DIR override added to binary.
+- [x] 9.2 `#[cfg(unix)]` `real_pty_hook_sourced_stop_emits_idle` — write a `.state` file
   out-of-band (`{Stop, ts:1}`) while `run_signal_loop` is running over a real PTY tee (General
   command), assert a `StatusChanged(Idle)` is emitted (the M2 real-PTY template, hook-sourced
   path). `[REQ:pipeline-augmentation/run_signal_loop]` `[unit/ci]`
-- [ ] **Gate (WU-9)**: `cargo test --workspace` green incl. the `#[cfg(unix)]` integration tests on
-  macOS; fmt/clippy clean; `cargo deny ...` exits 0.
+  Lives in `src-tauri/tests/hook_integration.rs` alongside 9.1.
+- [x] **Gate (WU-9)**: `cargo test --workspace` green incl. the `#[cfg(unix)]` integration tests on
+  macOS; fmt/clippy clean; `cargo deny ...` exits 0. (231 tests, all passing)
 
 > **Slice 1 COMPLETE after WU-9.** All Stop + UserPromptSubmit hook plumbing is shipped.
 > Rollback floor = M2 scraping-only (revert WU-2 through WU-9).

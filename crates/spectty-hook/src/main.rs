@@ -83,10 +83,24 @@ fn drain_stdin() {
 ///
 /// Returns `Ok(())` on success, `Err(RunError)` for any non-zero-exit condition.
 /// Separated from `main` so unit tests can call it without spawning a process.
+///
+/// ## Environment variables
+///
+/// - `SPECTTY_SESSION_ID` (required): correlation key; written into the state file.
+/// - `SPECTTY_RUNTIME_DIR` (optional): override the resolved runtime directory.
+///   When set, the binary uses this path instead of `spectty_runtime_dir()`. Used
+///   by the WU-9 integration test to point the binary at a PID-unique temp dir
+///   without touching the real `~/Library/Application Support` path. Consistent
+///   with the existing `run_with` DI seam (the test seam that avoids env mutation).
 pub(crate) fn run() -> Result<(), RunError> {
     let args = std::env::args().collect::<Vec<_>>();
     let session_id = std::env::var("SPECTTY_SESSION_ID").ok();
-    let runtime_dir = spectty_runtime_dir();
+    // `SPECTTY_RUNTIME_DIR` overrides the platform resolver for the integration
+    // test seam (WU-9). In production it is unset and the normal resolver runs.
+    let runtime_dir = std::env::var("SPECTTY_RUNTIME_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(spectty_runtime_dir);
     run_with(
         args.as_slice(),
         session_id.as_deref(),
