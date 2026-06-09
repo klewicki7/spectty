@@ -1,6 +1,6 @@
 # M3 — Hook-Based Status Detection — Task Checklist
 
-> **STATUS: IN PROGRESS.** PR-1a (WU-1 + WU-2 + WU-3) COMPLETE. PR-1b (WU-4 + WU-5 + WU-6) COMPLETE. PR-2 (WU-7 + WU-8) COMPLETE. WU-9/10/11 pending.
+> **STATUS: IN PROGRESS.** PR-1a (WU-1 + WU-2 + WU-3) COMPLETE. PR-1b (WU-4 + WU-5 + WU-6) COMPLETE. PR-2 (WU-7 + WU-8) COMPLETE. PR-2 adversarial fixes (C1/C2/C3/W1/W2) COMPLETE (227 tests). WU-9/10/11 pending.
 >
 > SDD tasks phase. Consumes `sdd/M3-hook-status-detection/spec` (obs #830) +
 > `openspec/changes/M3-hook-status-detection/specs/*` and
@@ -455,6 +455,29 @@ stale-state-file-deleted-before-loop.
     `[REQ:hook-provisioning/ClaudeSettingsProvisioner]` `[unit]` `[D21]`
 - [x] **Gate (WU-8)**: `cargo test --workspace` green (4 new lifecycle tests + all prior = 215 total);
   fmt clean; clippy clean; `cargo deny ... check bans` → `bans ok`; `cargo build -p spectty` succeeds.
+
+---
+
+## PR-2 Adversarial Review Fixes (applied on feat/m3-pr2-signal-loop)
+
+> Defects found by sdd-verify adversarial pass after WU-7+WU-8. All fixed via RED→GREEN TDD.
+> Commits: 1d1a37e (C2/C3/W1/W2) + c0c9d93 (C1). Test count: 215→227 (+12 tests).
+
+- [x] **C1 (CRITICAL)**: `emit_scraping_guarded()` added to `session_runtime.rs` — suppresses
+  scraping-derived `Ready` when `hooks_active=true` (gate: `!hook_reader.path().is_empty()`).
+  M2 stopgap preserved for sessions WITHOUT hooks. EOF arm intentionally ungated (process exit
+  must still drive Running→Idle when no Stop hook fires). `[D24]`
+- [x] **C2 (CRITICAL)**: `PtySpawnConfig.env: Vec<(String, String)>` added; `adapter.rs` wires
+  `command.env(k,v)` on spawn; `session.rs` passes `spec.env` at construction so
+  `SPECTTY_SESSION_ID` actually reaches the PTY child.
+- [x] **C3 (CRITICAL)**: `ensure_runtime_dir(dir)` calls `fs::create_dir_all` in `spawn_session`
+  before PTY spawn. Failure silently ignored (best-effort) — PTY spawn proceeds with inactive
+  hook pipeline rather than aborting the session.
+- [x] **W1 (WARNING)**: `remove_stale_tmp_files(runtime_dir, session_id)` scans dir for
+  `spectty-{id}.*.state.tmp` (prefix + suffix match) — replaces the broken fixed-path formula
+  that never matched PID-unique filenames.
+- [x] **W2 (WARNING)**: `remove_stale_state_file(runtime_dir, session_id)` best-effort removes
+  `spectty-{id}.state` pre-spawn (opportunistic sweep, design §6).
 
 ---
 
