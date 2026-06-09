@@ -85,14 +85,16 @@ WU-1 (manifests) ─────────────────────
   `[REQ:spectty-hook-sidecar/atomic-write]` `[ci]` `[D25]`
 - [x] 1.2 Add `"crates/spectty-hook"` to the workspace `members` list in root `Cargo.toml`.
   `[REQ:bundling/externalBin]` `[ci]` `[D25]`
-- [ ] 1.3 Add `bundle.externalBin` to `src-tauri/tauri.conf.json` declaring BOTH
+- [x] 1.3 Add `bundle.externalBin` to `src-tauri/tauri.conf.json` declaring BOTH
   `"binaries/spectty-mcp"` AND `"binaries/spectty-hook"` (target-triple-suffixed per Tauri sidecar
   convention). This closes M2 L2 for spectty-mcp and establishes bundling for spectty-hook.
   `[REQ:bundling/externalBin → Scenario: tauri.conf.json contains both sidecar entries]` `[ci]` `[D25]`
-  **DEFERRED (adversarial review W3)**: sidecar bundling (`externalBin` + real per-triple binaries
-  generated in CI) is out of WU-4 scope. Empty committed stubs were a footgun (0-byte files, only one
-  target triple, clobber real local builds on checkout). Reverted in fix(spectty-hook): C1/W1/W3/W4.
-  This task belongs in a dedicated packaging work unit, not WU-4.
+  **RESOLVED (PR-4b packaging)**: `externalBin` lives in `src-tauri/tauri.bundle.conf.json` (overlay
+  merged via `TAURI_CONFIG` only when tauri CLI is invoked with `--config src-tauri/tauri.bundle.conf.json`);
+  `scripts/build-sidecars.sh` builds real release binaries and places them in `src-tauri/binaries/`;
+  `beforeBuildCommand` runs the script before cargo. Plain `cargo build --workspace` stays green
+  (no `TAURI_CONFIG` → no externalBin validation). Bundle verified: `Contents/MacOS/` contains
+  `spectty`, `spectty-mcp`, and `spectty-hook`.
 - [x] 1.4 Confirm `crates/core/Cargo.toml` runtime deps UNCHANGED (serde + thiserror only).
   `[REQ:hook-provisioning/ClaudeSettingsProvisioner — CORE UNCHANGED]` `[ci]` `[D21]`
 - [x] **Gate (WU-1)**: `cargo build --workspace` succeeds (empty spectty-hook main stub OK);
