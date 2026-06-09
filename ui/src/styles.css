@@ -27,3 +27,164 @@ body,
   padding: 4px;
   box-sizing: border-box;
 }
+
+/* Pane header: session title on the left, AgentStatus badge on the right. */
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #252526;
+  border-bottom: 1px solid #333;
+  color: #d4d4d4;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.pane-header__title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Keep the title left while the status badge + Close button group right. */
+  margin-right: auto;
+}
+
+/* Close the active session. Purely presentational — invokes the parent's
+   `onClose` (which owns `useSession.close`); the header never calls IPC. */
+.pane-header__close {
+  padding: 2px 10px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #3a3a3a;
+  color: #d4d4d4;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pane-header__close:hover {
+  background: #4a4a4a;
+  border-color: #777;
+}
+
+/* AgentStatus badge. The `--variant` modifier keys the color; Running and
+   AwaitingInput pulse to signal live/attention states (design 6.5). */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e1e1e;
+  background: #888;
+}
+
+.status-badge--none {
+  background: #555;
+  color: #ccc;
+}
+.status-badge--starting {
+  background: #9e9e9e;
+}
+.status-badge--idle {
+  background: #4f9dff;
+  color: #08233f;
+}
+.status-badge--running {
+  background: #3ec46d;
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+.status-badge--awaiting-input {
+  background: #f2b134;
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+.status-badge--completed {
+  background: #9e9e9e;
+}
+.status-badge--completed::before {
+  content: "✓ ";
+}
+.status-badge--error {
+  background: #e0524d;
+  color: #fff;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Spawn dialog: a compact form above the terminal pane (M2 functional surface;
+   M3+ refine the cockpit). Text inputs avoid a dialog plugin/permission. */
+.spawn-dialog {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 10px;
+  background: #1b1b1b;
+  border-bottom: 1px solid #333;
+  color: #d4d4d4;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.spawn-dialog__agents {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin: 0;
+}
+
+.spawn-dialog__agents legend {
+  padding: 0 4px;
+  color: #9b9b9b;
+}
+
+.spawn-dialog__agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.spawn-dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #9b9b9b;
+}
+
+.spawn-dialog__field input {
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #f0f0f0;
+  padding: 4px 6px;
+  font-size: 13px;
+}
+
+.spawn-dialog button {
+  background: #0e639c;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.spawn-dialog button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
