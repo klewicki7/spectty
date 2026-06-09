@@ -84,8 +84,13 @@ fn drain_stdin() {
 /// Returns `Ok(())` on success, `Err(RunError)` for any non-zero-exit condition.
 /// Separated from `main` so unit tests can call it without spawning a process.
 pub(crate) fn run() -> Result<(), RunError> {
+    let args = std::env::args().collect::<Vec<_>>();
+    let session_id = std::env::var("SPECTTY_SESSION_ID").ok();
+    let runtime_dir = spectty_runtime_dir();
     run_with(
-        std::env::args().collect::<Vec<_>>().as_slice(),
+        args.as_slice(),
+        session_id.as_deref(),
+        runtime_dir.as_deref(),
         &mut |path| {
             std::fs::read_to_string(path).ok().and_then(|s| {
                 serde_json::from_str::<serde_json::Value>(&s)
@@ -96,22 +101,35 @@ pub(crate) fn run() -> Result<(), RunError> {
     )
 }
 
-/// Testable inner core: accepts injected args + runtime-dir resolver.
+/// Testable inner core: accepts injected args, session_id, runtime_dir, and a
+/// prior-ts reader closure.
 ///
-/// The `read_prior_ts` closure abstracts the filesystem read so tests can
-/// inject a no-op or a controlled value.
+/// All environment-sourced values (`SPECTTY_SESSION_ID`, `HOME`/`LOCALAPPDATA`,
+/// `XDG_DATA_HOME`) are resolved by the caller and passed in explicitly. Tests
+/// can therefore inject arbitrary values without mutating process-global env,
+/// which would race against parallel test threads.
+///
+/// - `session_id`: `None` → `RunError::MissingSessionId`
+/// - `runtime_dir`: `None` → `RunError::MissingRuntimeDir` (resolver returned None)
+/// - `runtime_dir` pointing to a non-existent path → `RunError::MissingRuntimeDir`
+/// - `read_prior_ts`: closure called with the canonical state-file path; returns
+///   `Some(ts)` if a prior file exists, `None` on absence or parse error.
 pub(crate) fn run_with(
     args: &[String],
+    session_id: Option<&str>,
+    runtime_dir: Option<&std::path::Path>,
     read_prior_ts: &mut impl FnMut(&str) -> Option<u64>,
 ) -> Result<(), RunError> {
     // ── 1. Parse --event <Name> ───────────────────────────────────────────────
     let event_name = parse_event_arg(args).ok_or(RunError::MissingEventArg)?;
 
-    // ── 2. Read SPECTTY_SESSION_ID ────────────────────────────────────────────
-    let session_id = std::env::var("SPECTTY_SESSION_ID").map_err(|_| RunError::MissingSessionId)?;
+    // ── 2. Resolve SPECTTY_SESSION_ID ────────────────────────────────────────
+    let session_id = session_id.ok_or(RunError::MissingSessionId)?;
 
     // ── 3. Resolve runtime dir ────────────────────────────────────────────────
-    let runtime_dir: PathBuf = spectty_runtime_dir().ok_or(RunError::MissingRuntimeDir)?;
+    let runtime_dir: PathBuf = runtime_dir
+        .ok_or(RunError::MissingRuntimeDir)?
+        .to_path_buf();
 
     // The runtime dir must exist — the provisioner creates it before injecting hooks.
     // If it does not exist, fail fast (the binary should not create it; that is
@@ -122,7 +140,12 @@ pub(crate) fn run_with(
 
     // ── 4. Build state-file paths ─────────────────────────────────────────────
     let state_path = runtime_dir.join(format!("spectty-{session_id}.state"));
-    let state_tmp = runtime_dir.join(format!("spectty-{session_id}.state.tmp"));
+    // Include the PID to make the tmp name unique per process invocation.
+    // Two concurrent hook processes for the same session each write to their own
+    // tmp file; the last rename wins (monotonic counter means last-writer-wins is
+    // safe and self-correcting for the reader).
+    let pid = std::process::id();
+    let state_tmp = runtime_dir.join(format!("spectty-{session_id}.{pid}.state.tmp"));
 
     let state_path_str = state_path.to_string_lossy().into_owned();
     let state_tmp_str = state_tmp.to_string_lossy().into_owned();
@@ -130,7 +153,7 @@ pub(crate) fn run_with(
     // ── 5. Call the pure handler ──────────────────────────────────────────────
     handle_event(
         event_name,
-        &session_id,
+        session_id,
         || {
             let ts = read_prior_ts(&state_path_str);
             Ok(ts)
@@ -161,18 +184,18 @@ mod tests {
     use super::*;
 
     // ── 4.3: missing SPECTTY_SESSION_ID → RunError::MissingSessionId ─────────
+    //
+    // Uses the DI seam (run_with session_id: None) instead of mutating the
+    // process-global env. No env mutation = no race with parallel test threads.
     #[test]
     fn spectty_hook_rejects_missing_session_id() {
-        // Remove the env var for this test (process-level — tests must not run in
-        // parallel with env mutation; cargo test is single-threaded per test binary).
-        std::env::remove_var("SPECTTY_SESSION_ID");
-
         let args: Vec<String> = vec![
             "spectty-hook".to_string(),
             "--event".to_string(),
             "Stop".to_string(),
         ];
-        let result = run_with(&args, &mut |_| None);
+        // Pass session_id: None to simulate absent SPECTTY_SESSION_ID.
+        let result = run_with(&args, None, None, &mut |_| None);
 
         assert!(
             matches!(result, Err(RunError::MissingSessionId)),
@@ -181,33 +204,24 @@ mod tests {
     }
 
     // ── 4.4: non-existent runtime dir → RunError::MissingRuntimeDir ──────────
+    //
+    // Uses the DI seam (run_with runtime_dir: Some(non_existent_path)) instead
+    // of mutating $HOME / $XDG_DATA_HOME. No env mutation = no race.
     #[test]
     fn spectty_hook_rejects_missing_runtime_dir() {
-        // Point $HOME at a fresh temp directory so spectty_runtime_dir() resolves
-        // to a path that does NOT exist (no `Library/Application Support/...` subdir).
-        let tmp_home = std::env::temp_dir().join("spectty_hook_test_missing_runtime");
-        std::fs::create_dir_all(&tmp_home).expect("create fake home");
-
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", tmp_home.to_string_lossy().as_ref());
-        std::env::set_var("SPECTTY_SESSION_ID", "test-session-4-4");
-
         let args: Vec<String> = vec![
             "spectty-hook".to_string(),
             "--event".to_string(),
             "Stop".to_string(),
         ];
-        let result = run_with(&args, &mut |_| None);
-
-        // Restore env
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-
-        // Clean up temp dir (best-effort)
-        let _ = std::fs::remove_dir_all(&tmp_home);
+        // Pass a path that does not exist on disk.
+        let nonexistent = std::path::Path::new("/tmp/spectty_hook_test_no_such_runtime_dir_xyz");
+        let result = run_with(
+            &args,
+            Some("test-session-4-4"),
+            Some(nonexistent),
+            &mut |_| None,
+        );
 
         assert!(
             matches!(result, Err(RunError::MissingRuntimeDir)),

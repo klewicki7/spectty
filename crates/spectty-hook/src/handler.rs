@@ -82,6 +82,17 @@ pub fn handle_event(
     let event = HookEvent::parse(event_name)
         .ok_or_else(|| HandleError::UnknownEvent(event_name.to_string()))?;
 
+    // `read_prior` returns:
+    //   Ok(Some(ts)) — a valid prior state file with a ts field
+    //   Ok(None)     — no prior file (first write for this session)
+    //   Err(_)       — I/O error OR the file is corrupt / unparseable JSON
+    //
+    // Both the absent-file and corrupt-file cases collapse to ts = 0 here,
+    // so next_ts starts at 1. This is intentional: corruption is rare and
+    // self-correcting — once the sidecar writes ts=1, the monotonic counter
+    // climbs again and the reader (StateFileReader) advances past its last_ts
+    // on the next event. The reader is strict-greater, so a reset to 1 only
+    // stalls delivery until the next genuine event fires (a single event latency).
     let prior_ts: u64 = read_prior().unwrap_or(None).unwrap_or(0);
     let next_ts = prior_ts + 1;
 
