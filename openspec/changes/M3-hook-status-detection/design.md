@@ -141,11 +141,13 @@ State-file JSON shape (the sidecar↔reader contract):
 
 ### 3.3 Consume-once reader (`hook/reader.rs`)
 ```rust
-pub struct StateFileReader { path: String, last_ts: Option<u64> }
+pub struct StateFileReader { path: String, session_id: String, last_ts: Option<u64> }
 impl StateFileReader {
-    pub fn new(runtime_dir: &str, session_id: &str) -> Self; // path = {dir}/spectty-{id}.state
-    /// Read+parse the file; return Some(event) ONLY if its `ts` is strictly greater than
-    /// the last consumed `ts` (then advance last_ts). Absent/unchanged/older → None.
+    pub fn new(runtime_dir: &str, session_id: &str) -> Self; // path = {dir}/spectty-{id}.state; session_id stored for D23 correlation
+    /// Read+parse the file; return Some(event) ONLY if its `session_id` matches self.session_id
+    /// (D23) AND its `ts` is strictly greater than the last consumed `ts` (then advance last_ts).
+    /// session_id mismatch → None without advancing last_ts (stale cross-session file).
+    /// Absent/unchanged/older → None.
     pub fn poll(&mut self, read: &dyn Fn(&str) -> std::io::Result<Option<String>>) -> Option<HookEvent>;
 }
 ```
