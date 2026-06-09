@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod clock;
+pub mod hook;
 pub mod persistence;
 pub mod provision;
 pub mod pty;
@@ -15,8 +16,10 @@ pub mod pty;
 pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSignalProducer};
 pub use clock::SystemClock;
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
+pub use hook::{event_to_observed, parse_state_file, HookEvent, HookState, StateFileReader};
 pub use provision::{
-    inject_spectty_mcp, is_git_tracked, resolve_scope, retract_spectty_mcp, ClaudeJsonProvisioner,
-    ConfigFile, McpServerEntry, RealConfigFile,
+    inject_spectty_hooks, inject_spectty_mcp, is_git_tracked, resolve_scope,
+    retract_spectty_hooks, retract_spectty_mcp, settings_path_for_scope, ClaudeJsonProvisioner,
+    ClaudeSettingsProvisioner, ConfigFile, HookCommandEntry, McpServerEntry, RealConfigFile,
 };
 pub use pty::{Coalescer, PtyAdapter, PtyError, PtySpawnConfig, PtyTransport};

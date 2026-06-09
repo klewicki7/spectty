@@ -18,6 +18,7 @@ spectty-core = { workspace = true }
 # depends on serde_json as a DEV-dependency exclusively, so neither serde_json
 # nor indexmap ever enters Core's runtime (`-e normal`) graph; the hexagonal
 # quarantine and `cargo deny ... check bans` stay green.
+serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

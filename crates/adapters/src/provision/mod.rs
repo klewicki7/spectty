@@ -19,8 +19,13 @@ pub mod claude_provisioner;
 pub mod file_io;
 pub mod json_namespace;
 pub mod scope;
+pub mod settings_provisioner;
 
 pub use claude_provisioner::ClaudeJsonProvisioner;
 pub use file_io::{ConfigFile, RealConfigFile};
-pub use json_namespace::{inject_spectty_mcp, retract_spectty_mcp, McpServerEntry};
-pub use scope::{is_git_tracked, resolve_scope};
+pub use json_namespace::{
+    inject_spectty_hooks, inject_spectty_mcp, retract_spectty_hooks, retract_spectty_mcp,
+    HookCommandEntry, McpServerEntry,
+};
+pub use scope::{is_git_tracked, resolve_scope, settings_path_for_scope};
+pub use settings_provisioner::ClaudeSettingsProvisioner;

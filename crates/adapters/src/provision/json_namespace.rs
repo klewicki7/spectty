@@ -120,6 +120,129 @@ fn serialize_pretty(value: &Value) -> Result<String, ProvisioningError> {
     serde_json::to_string_pretty(value).map_err(|e| ProvisioningError::Parse(e.to_string()))
 }
 
+/// One hook command Spectty registers under a `hooks.<EventName>` array.
+///
+/// Serializes to the Claude Code hook shape:
+/// `{ "type": "command", "command": "<spectty-hook path>", "args": ["--event","<Name>"] }`
+/// The `type` field is always `"command"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCommandEntry {
+    /// The command to launch (the `spectty-hook` binary path).
+    pub command: String,
+    /// Arguments passed to the command (e.g. `["--event", "Stop"]`).
+    pub args: Vec<String>,
+}
+
+impl HookCommandEntry {
+    /// Render this entry as the hook-list element Claude Code expects:
+    /// `{ "hooks": [ { "type": "command", "command": "...", "args": [...] } ] }`
+    ///
+    /// An optional `matcher` string is inserted when `matcher` is `Some`.
+    fn to_hook_list_element(&self, matcher: Option<&str>) -> Value {
+        let mut inner = Map::new();
+        inner.insert("type".to_string(), Value::String("command".to_string()));
+        inner.insert("command".to_string(), Value::String(self.command.clone()));
+        inner.insert(
+            "args".to_string(),
+            Value::Array(self.args.iter().cloned().map(Value::String).collect()),
+        );
+        let mut outer = Map::new();
+        if let Some(m) = matcher {
+            outer.insert("matcher".to_string(), Value::String(m.to_string()));
+        }
+        outer.insert(
+            "hooks".to_string(),
+            Value::Array(vec![Value::Object(inner)]),
+        );
+        Value::Object(outer)
+    }
+}
+
+/// Inject (or replace) ONLY the Spectty-owned rows in `hooks.<EventName>[]`, leaving
+/// every foreign hook entry and every foreign top-level key intact. Idempotent:
+/// injecting twice with the same entry yields the same document.
+///
+/// `events` maps `EventName` → `(HookCommandEntry, Option<matcher>)`. The owned rows
+/// are identified by the inner `hooks[].command` field equalling `entry.command` (the
+/// Spectty hook binary path), so a user's own hook on the same event survives.
+///
+/// If `hooks` is missing it is created. The root MUST be a JSON object; a non-object
+/// document is a [`ProvisioningError::Parse`].
+///
+/// **R7 GENERALIZED (D21)**: settings.json `hooks` is `EventName → [{ matcher?, hooks:
+/// [{type, command, args}] }]` — more nested than `mcpServers`. The owned-key predicate
+/// changes: we own ROWS whose inner `hooks[].command` == our sidecar path, not a named
+/// key. Retract removes only those rows, leaving foreign rows + empty event arrays intact.
+pub fn inject_spectty_hooks(
+    current_json: &str,
+    events: &[(String, HookCommandEntry, Option<String>)],
+) -> Result<String, ProvisioningError> {
+    let mut root = parse_root_object(current_json)?;
+
+    let hooks_map = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let hooks_map = hooks_map
+        .as_object_mut()
+        .ok_or_else(|| ProvisioningError::Parse("`hooks` is not an object".to_string()))?;
+
+    for (event_name, entry, matcher) in events {
+        let event_array = hooks_map
+            .entry(event_name.clone())
+            .or_insert_with(|| Value::Array(vec![]));
+        let event_array = event_array
+            .as_array_mut()
+            .ok_or_else(|| ProvisioningError::Parse(format!("`hooks.{event_name}` is not an array")))?;
+
+        // Remove any existing Spectty-owned rows for this event (idempotent replace).
+        event_array.retain(|element| !is_spectty_hook_element(element, &entry.command));
+
+        // Append the new Spectty row.
+        event_array.push(entry.to_hook_list_element(matcher.as_deref()));
+    }
+
+    serialize_pretty(&Value::Object(root))
+}
+
+/// Retract ONLY Spectty-owned rows from every `hooks.<EventName>[]`, leaving every
+/// foreign hook entry intact. Idempotent: retracting absent rows is a no-op.
+///
+/// Spectty owns a row when its inner `hooks[].command` equals `hook_command` (the
+/// resolved path of the `spectty-hook` binary).
+pub fn retract_spectty_hooks(
+    current_json: &str,
+    hook_command: &str,
+) -> Result<String, ProvisioningError> {
+    let mut root = parse_root_object(current_json)?;
+
+    if let Some(hooks_map) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        for event_array in hooks_map.values_mut() {
+            if let Some(arr) = event_array.as_array_mut() {
+                arr.retain(|element| !is_spectty_hook_element(element, hook_command));
+            }
+        }
+    }
+
+    serialize_pretty(&Value::Object(root))
+}
+
+/// Returns `true` if a hook-list element is owned by Spectty: i.e. any inner
+/// `hooks[].command` equals `hook_command`.
+fn is_spectty_hook_element(element: &Value, hook_command: &str) -> bool {
+    element
+        .get("hooks")
+        .and_then(Value::as_array)
+        .map(|hooks| {
+            hooks.iter().any(|h| {
+                h.get("command")
+                    .and_then(Value::as_str)
+                    .map(|c| c == hook_command)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +456,292 @@ mod tests {
             matches!(err, ProvisioningError::Parse(_)),
             "non-object mcpServers surfaces a Parse error instead of clobbering it"
         );
+    }
+
+    // ── WU-2: inject_spectty_hooks / retract_spectty_hooks ───────────────────
+
+    /// Managed `HookCommandEntry` used in all WU-2 tests: a fictitious spectty-hook
+    /// binary path with a `--event Stop` argument.
+    fn hook_entry_stop() -> HookCommandEntry {
+        HookCommandEntry {
+            command: "/usr/local/bin/spectty-hook".to_string(),
+            args: vec!["--event".to_string(), "Stop".to_string()],
+        }
+    }
+
+    fn hook_entry_submit() -> HookCommandEntry {
+        HookCommandEntry {
+            command: "/usr/local/bin/spectty-hook".to_string(),
+            args: vec!["--event".to_string(), "Submit".to_string()],
+        }
+    }
+
+    /// A HAND-FORMATTED settings.json with:
+    /// - a `permissions` key (foreign top-level)
+    /// - an `env` key (foreign top-level)
+    /// - a `model` key (foreign top-level)
+    /// - a user-authored hook on `Stop` (same event Spectty manages — MUST SURVIVE)
+    /// - a user-authored hook on `PreToolUse` (different event — MUST SURVIVE)
+    ///
+    /// This is the realistic shape of `~/.claude/settings.json` and is the fixture
+    /// for the HEADLINE R7 generalized test.
+    fn hand_formatted_settings() -> &'static str {
+        r#"{
+    "model": "claude-opus-4-5",
+    "permissions": {
+        "allow": ["Bash"],
+        "deny": []
+    },
+    "env": {
+        "MY_VAR": "hello"
+    },
+    "hooks": {
+        "Stop": [
+            {
+                "matcher": "error",
+                "hooks": [
+                    { "type": "command", "command": "/usr/local/bin/user-notify", "args": ["--on-error"] }
+                ]
+            }
+        ],
+        "PreToolUse": [
+            {
+                "hooks": [
+                    { "type": "command", "command": "/usr/bin/logger", "args": ["-t", "claude"] }
+                ]
+            }
+        ]
+    }
+}"#
+    }
+
+    /// THE HEADLINE R7 GENERALIZED TEST.
+    ///
+    /// Starts from genuinely HAND-FORMATTED `settings.json` carrying foreign
+    /// top-level keys (`permissions`, `env`, `model`) AND a foreign user hook on
+    /// the SAME event (`Stop`) that Spectty manages. After inject→retract:
+    ///
+    /// 1. No Spectty rows remain.
+    /// 2. Every foreign top-level key keeps its VALUE.
+    /// 3. The foreign `Stop` hook (user-authored, different command path) survives
+    ///    both the inject AND the retract — value + position preserved.
+    /// 4. The foreign `PreToolUse` hook survives.
+    /// 5. With `preserve_order`, the original relative key ORDER is preserved
+    ///    (asserted against RAW serialized text, not re-parsed Values, so an
+    ///    alphabetical re-sort is caught).
+    ///
+    /// This is the ONLY test that proves the "foreign hook on same event" survival
+    /// property — the central correctness invariant of R7 generalized.
+    #[test]
+    fn hooks_inject_then_retract_foreign_hook_on_same_event_survives() {
+        let original = hand_formatted_settings();
+        let original_value: Value = serde_json::from_str(original).expect("valid input");
+
+        let events = vec![
+            ("Stop".to_string(), hook_entry_stop(), None),
+        ];
+        let injected = inject_spectty_hooks(original, &events).expect("inject ok");
+        let injected_value: Value = serde_json::from_str(&injected).expect("valid after inject");
+
+        // After inject: the Spectty row is present in Stop[].
+        let stop_hooks = injected_value["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop is array");
+        let has_spectty = stop_hooks.iter().any(|el| {
+            el.get("hooks")
+                .and_then(Value::as_array)
+                .map(|h| {
+                    h.iter().any(|inner| {
+                        inner["command"] == "/usr/local/bin/spectty-hook"
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_spectty, "Spectty row added to Stop after inject");
+
+        // After inject: the foreign user Stop row SURVIVES with its value intact.
+        let foreign_stop_survives = stop_hooks.iter().any(|el| {
+            el.get("hooks")
+                .and_then(Value::as_array)
+                .map(|h| {
+                    h.iter().any(|inner| {
+                        inner["command"] == "/usr/local/bin/user-notify"
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            foreign_stop_survives,
+            "foreign user hook on Stop survives inject (same event, different command)"
+        );
+
+        // Retract.
+        let retracted = retract_spectty_hooks(&injected, "/usr/local/bin/spectty-hook")
+            .expect("retract ok");
+        let retracted_value: Value = serde_json::from_str(&retracted).expect("valid after retract");
+
+        // No Spectty row remains after retract.
+        let spectty_remains = retracted_value["hooks"]["Stop"]
+            .as_array()
+            .map(|arr| arr.iter().any(|el| {
+                el.get("hooks")
+                    .and_then(Value::as_array)
+                    .map(|h| h.iter().any(|inner| inner["command"] == "/usr/local/bin/spectty-hook"))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        assert!(!spectty_remains, "no Spectty row remains after retract");
+
+        // The foreign Stop hook is back, value unchanged.
+        let foreign_after_retract = retracted_value["hooks"]["Stop"]
+            .as_array()
+            .map(|arr| arr.iter().any(|el| {
+                el.get("hooks")
+                    .and_then(Value::as_array)
+                    .map(|h| h.iter().any(|inner| inner["command"] == "/usr/local/bin/user-notify"))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        assert!(
+            foreign_after_retract,
+            "foreign user hook on Stop survives retract"
+        );
+
+        // Foreign Stop hook VALUE matches the original.
+        assert_eq!(
+            retracted_value["hooks"]["Stop"],
+            original_value["hooks"]["Stop"],
+            "foreign Stop hook value round-trips byte-meaningfully"
+        );
+
+        // Foreign top-level keys keep their values.
+        for key in ["model", "permissions", "env"] {
+            assert_eq!(
+                retracted_value[key], original_value[key],
+                "foreign top-level value preserved: {key}"
+            );
+        }
+
+        // PreToolUse hook survives.
+        assert_eq!(
+            retracted_value["hooks"]["PreToolUse"],
+            original_value["hooks"]["PreToolUse"],
+            "foreign PreToolUse hook survives"
+        );
+
+        // With preserve_order, top-level key order is preserved (TEXT comparison).
+        let top = ["model", "permissions", "env", "hooks"];
+        assert_eq!(
+            text_key_order(&retracted, &top),
+            text_key_order(original, &top),
+            "top-level key TEXT order unchanged after inject→retract"
+        );
+    }
+
+    #[test]
+    fn hooks_inject_is_idempotent() {
+        let events = vec![
+            ("Stop".to_string(), hook_entry_stop(), None),
+        ];
+        let once = inject_spectty_hooks("{}", &events).expect("inject 1");
+        let twice = inject_spectty_hooks(&once, &events).expect("inject 2");
+        let once_value: Value = serde_json::from_str(&once).expect("valid");
+        let twice_value: Value = serde_json::from_str(&twice).expect("valid");
+        // Idempotent: exact same Stop array length (one Spectty row).
+        assert_eq!(
+            once_value["hooks"]["Stop"].as_array().map(|a| a.len()),
+            twice_value["hooks"]["Stop"].as_array().map(|a| a.len()),
+            "double inject results in same number of Stop rows (idempotent)"
+        );
+    }
+
+    #[test]
+    fn hooks_inject_into_empty_document_creates_hooks_section() {
+        let events = vec![
+            ("Stop".to_string(), hook_entry_stop(), None),
+            ("UserPromptSubmit".to_string(), hook_entry_submit(), None),
+        ];
+        let injected = inject_spectty_hooks("{}", &events).expect("inject into empty");
+        let parsed: Value = serde_json::from_str(&injected).expect("valid JSON");
+
+        assert!(
+            parsed["hooks"]["Stop"].as_array().is_some(),
+            "Stop event created"
+        );
+        assert!(
+            parsed["hooks"]["UserPromptSubmit"].as_array().is_some(),
+            "UserPromptSubmit event created"
+        );
+    }
+
+    #[test]
+    fn hooks_retract_when_absent_is_a_noop() {
+        // A settings.json with no hooks key: retract is a no-op.
+        let no_hooks = serde_json::to_string_pretty(&serde_json::json!({
+            "model": "claude-opus-4-5"
+        }))
+        .expect("fixture");
+
+        let retracted =
+            retract_spectty_hooks(&no_hooks, "/usr/local/bin/spectty-hook").expect("retract absent");
+        // Value must be unchanged (modulo canonical reserialize).
+        let orig_v: Value = serde_json::from_str(&no_hooks).expect("valid");
+        let ret_v: Value = serde_json::from_str(&retracted).expect("valid");
+        assert_eq!(orig_v, ret_v, "retract with no hooks key is a no-op");
+    }
+
+    #[test]
+    fn hooks_non_object_hooks_key_is_a_parse_error_not_data_loss() {
+        let config = r#"{ "hooks": [] }"#;
+        let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
+        let err = inject_spectty_hooks(config, &events).expect_err("must error");
+        assert!(
+            matches!(err, ProvisioningError::Parse(_)),
+            "non-object hooks surfaces a Parse error instead of clobbering it"
+        );
+    }
+
+    #[test]
+    fn hooks_no_matcher_entry_has_no_matcher_field() {
+        // A Stop hook entry (no matcher) MUST NOT contain a `matcher` field (absent, not null).
+        let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
+        let injected = inject_spectty_hooks("{}", &events).expect("inject");
+        let parsed: Value = serde_json::from_str(&injected).expect("valid JSON");
+
+        let stop_entry = &parsed["hooks"]["Stop"][0];
+        assert!(
+            stop_entry.get("matcher").is_none(),
+            "no-matcher event MUST NOT have a matcher field; got: {stop_entry}"
+        );
+    }
+
+    #[test]
+    fn hooks_matcher_entry_has_matcher_field() {
+        // A Notification hook entry (permission-prompt matcher) MUST contain a `matcher` field.
+        let entry = HookCommandEntry {
+            command: "/usr/local/bin/spectty-hook".to_string(),
+            args: vec!["--event".to_string(), "Permission".to_string()],
+        };
+        let matcher = Some("Do you want to proceed".to_string());
+        let events = vec![("Notification".to_string(), entry, matcher)];
+        let injected = inject_spectty_hooks("{}", &events).expect("inject");
+        let parsed: Value = serde_json::from_str(&injected).expect("valid JSON");
+
+        let notif_entry = &parsed["hooks"]["Notification"][0];
+        assert!(
+            notif_entry.get("matcher").is_some(),
+            "Notification event MUST have a matcher field; got: {notif_entry}"
+        );
+        assert!(
+            !notif_entry["matcher"].as_str().unwrap_or("").is_empty(),
+            "matcher field must be non-empty"
+        );
+    }
+
+    #[test]
+    fn hooks_inject_invalid_json_is_a_parse_error_not_a_panic() {
+        let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
+        let err = inject_spectty_hooks("{not json", &events).expect_err("must error");
+        assert!(matches!(err, ProvisioningError::Parse(_)));
     }
 }
