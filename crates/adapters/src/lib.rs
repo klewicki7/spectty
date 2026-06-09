@@ -16,7 +16,7 @@ pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSign
 pub use clock::SystemClock;
 pub use persistence::{EngramAdapter, InMemoryPersistenceAdapter};
 pub use provision::{
-    inject_spectty_mcp, is_git_tracked, retract_spectty_mcp, ClaudeJsonProvisioner, ConfigFile,
-    McpServerEntry, RealConfigFile,
+    inject_spectty_mcp, is_git_tracked, resolve_scope, retract_spectty_mcp, ClaudeJsonProvisioner,
+    ConfigFile, McpServerEntry, RealConfigFile,
 };
 pub use pty::{Coalescer, PtyAdapter, PtyError, PtySpawnConfig, PtyTransport};

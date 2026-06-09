@@ -63,10 +63,12 @@ pub const QUIESCE: Duration = Duration::from_millis(200);
 pub const SIGNAL_WINDOW_BYTES: usize = 8 * 1024;
 
 /// The payload emitted on an actual status change. Mirrors the design's
-/// `StatusChanged` event shape; PR5b serializes it over the Tauri `status_changed`
-/// event. Kept here (not in `commands/`) so the pipeline owns its own output type
-/// and stays Tauri-free.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `StatusChanged` event shape and is serialized over the Tauri `status_changed`
+/// event (WU-9.9). Kept here (not in `commands/`) so the pipeline owns its own
+/// output type; it derives `Serialize` (every field is a Core serde type) but NOT
+/// any `tauri` trait, so `run_signal_loop` stays Tauri-free — `commands/session.rs`
+/// supplies the `app.emit` closure.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StatusChanged {
     /// The session whose status changed (== PtyId, D13).
     pub session_id: SessionId,

@@ -108,7 +108,7 @@ pub async fn pty_spawn(
     cwd: Option<String>,
     on_output: Channel<Vec<u8>>,
     registry: State<'_, PtyRegistry>,
-    sessions: State<'_, SessionRegistry>,
+    sessions: State<'_, std::sync::Arc<SessionRegistry>>,
 ) -> Result<PtyId, String> {
     let cfg = PtySpawnConfig::shell(cols, rows, cwd, |k| std::env::var(k).ok());
     let (adapter, reader) = PtyAdapter::spawn(&cfg).map_err(|e| e.to_string())?;
@@ -127,6 +127,8 @@ pub async fn pty_spawn(
         transport: Box::new(adapter),
         stop,
         reader_thread: Some(reader_thread),
+        // A raw PTY (no agent) injects no provisioning.
+        provisioning: None,
     };
 
     lock_registry(&registry.0)?.insert(id.clone(), state);
@@ -232,18 +234,21 @@ fn forward_step(
 /// `PtyState::shutdown`) tears down BOTH. `stop` short-circuits the read loop,
 /// and dropping the read thread's `Sender` disconnects the forwarder so it drains
 /// and exits — neither thread can leak.
-fn spawn_read_thread(
+/// Spawn the render forwarder thread: drain `rx` (raw slices from a read thread)
+/// through a [`Coalescer`] onto the `on_output` [`Channel`], and emit `pty_exit`
+/// when the read side disconnects.
+///
+/// Extracted from [`spawn_read_thread`] so the M2 session read thread
+/// (`commands/session.rs`) reuses the IDENTICAL M1 render path (R3 quiescent flush,
+/// the `pty_exit` lifecycle) while teeing a SECOND consumer for status detection.
+/// The render side stays UNBOUNDED (its own `mpsc`) so it is never throttled.
+pub(crate) fn spawn_render_forwarder(
     app: AppHandle,
     id: PtyId,
-    mut reader: Box<dyn Read + Send>,
+    rx: mpsc::Receiver<Vec<u8>>,
     on_output: Channel<Vec<u8>>,
-    stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>, String> {
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-
-    // Forwarder thread: owns the coalescer, the output channel, and the app
-    // handle. It is the only side that flushes and emits `pty_exit`.
-    let forwarder = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name(format!("pty-forward-{id}"))
         .spawn(move || {
             let mut coalescer = Coalescer::new(MAX_CHUNK, FLUSH_INTERVAL, Instant::now());
@@ -269,7 +274,21 @@ fn spawn_read_thread(
             // `None`; the child is reaped via `kill`/`Drop` on the registry side.
             let _ = app.emit("pty_exit", PtyExit { id, code: None });
         })
-        .map_err(|e| format!("failed to spawn pty forwarder thread: {e}"))?;
+        .map_err(|e| format!("failed to spawn pty forwarder thread: {e}"))
+}
+
+fn spawn_read_thread(
+    app: AppHandle,
+    id: PtyId,
+    mut reader: Box<dyn Read + Send>,
+    on_output: Channel<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+    // Forwarder thread (extracted so the M2 session read thread reuses the EXACT M1
+    // render discipline — Coalescer → Channel → `pty_exit`).
+    let forwarder = spawn_render_forwarder(app, id, rx, on_output)?;
 
     // Read thread: blocking reads → forward each slice over the mpsc. Owns and
     // joins the forwarder so a single `JoinHandle` tears down both threads.
@@ -363,6 +382,7 @@ mod tests {
                 transport: Box::new(FakePtyTransport(Arc::clone(&calls))),
                 stop: Arc::new(AtomicBool::new(false)),
                 reader_thread: None,
+                provisioning: None,
             },
         );
         (Mutex::new(map), calls)
