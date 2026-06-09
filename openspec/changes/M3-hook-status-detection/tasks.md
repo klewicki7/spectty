@@ -524,29 +524,29 @@ automatically since the provisioner passes the full event list). **Blocks**: WU-
 > Finished→Completed, Failed→Error. The Notification matcher constant is the only
 > empirical value to pin.
 
-- [ ] 10.1 RED: extend `event_to_observed_table` (WU-3.1 test) — add 3 assertions:
+- [x] 10.1 RED: extend `event_to_observed_table` (WU-3.1 test) — add 3 assertions:
   Permission→NeedsInput, SessionEnd→Finished, StopFailure→Failed. Confirm RED by removing one
   mapping. `[REQ:hook-status-mapping/five-hook-events]` `[unit]`
-- [ ] 10.2 RED: `inject_spectty_hooks_notification_entry_has_permission_matcher` — inspect the
+- [x] 10.2 RED: `inject_spectty_hooks_notification_entry_has_permission_matcher` — inspect the
   `Notification` hook entry in the output of `inject_spectty_hooks` called with all 5 events;
   assert `matcher` field is present and equals the `PERMISSION_PROMPT_MATCHER` constant.
   `[REQ:hook-status-mapping/hook-event-shape → Scenario: Notification event has a
   permission-prompt matcher]` `[unit]`
-- [ ] 10.3 GREEN: add `Permission`, `SessionEnd`, `StopFailure` to `crates/adapters/src/hook/state.rs`
+- [x] 10.3 GREEN: add `Permission`, `SessionEnd`, `StopFailure` to `crates/adapters/src/hook/state.rs`
   `HookEvent` enum + extend `event_to_observed` match arms + add `parse_state_file` deserialization
   for the 3 new names. `[REQ:hook-status-mapping/five-hook-events]` `[unit]`
-- [ ] 10.4 GREEN: add `pub const PERMISSION_PROMPT_MATCHER: &str = "…";` to
+- [x] 10.4 GREEN: add `pub const PERMISSION_PROMPT_MATCHER: &str = "…";` to
   `crates/adapters/src/hook/state.rs` (empirical string from Claude Code docs; NOT in Core).
   Add `HookCommandEntry { matcher: Some(PERMISSION_PROMPT_MATCHER.to_string()), .. }` to the
   Notification entry when constructing the event list in `ClaudeSettingsProvisioner`.
   `[REQ:hook-status-mapping/hook-event-shape → Scenario: Notification event has a
   permission-prompt matcher]` `[unit]`
-- [ ] 10.5 GREEN: extend `crates/spectty-hook/src/main.rs` to accept `Permission`, `SessionEnd`,
+- [x] 10.5 GREEN: extend `crates/spectty-hook/src/main.rs` to accept `Permission`, `SessionEnd`,
   `StopFailure` as valid `--event` names (extend the parse table). `[REQ:spectty-hook-sidecar/
   five-valid-events]` `[unit]`
-- [ ] 10.6 Compile + test: `ClaudeSettingsProvisioner` constructed with all 5 event entries in
+- [x] 10.6 Compile + test: `ClaudeSettingsProvisioner` constructed with all 5 event entries in
   `lib.rs`; the `inject_spectty_hooks` call-site updated accordingly. `[ci]`
-- [ ] **Gate (WU-10)**: `cargo test --workspace` green (all prior + 2 new Slice 2 tests); fmt clean;
+- [x] **Gate (WU-10)**: `cargo test --workspace` green (all prior + 2 new Slice 2 tests); fmt clean;
   clippy clean; `cargo deny ... check bans` → `bans ok`; `cargo build -p spectty` succeeds.
 
 ---
