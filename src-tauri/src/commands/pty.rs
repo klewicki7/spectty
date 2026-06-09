@@ -579,6 +579,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            env: Vec::new(),
         };
 
         let (mut adapter, mut reader) = PtyAdapter::spawn(&cfg).expect("real pty spawns");
@@ -657,6 +658,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            env: Vec::new(),
         };
 
         let (mut adapter, mut reader) = PtyAdapter::spawn(&cfg).expect("real pty spawns");

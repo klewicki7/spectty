@@ -367,6 +367,74 @@ pub fn close_session_impl_with_hooks(
 /// M1 `READ_BUF`).
 const READ_BUF: usize = 8 * 1024;
 
+/// C3 FIX: ensure the Spectty runtime directory exists before the sidecar is invoked.
+///
+/// The spectty-hook sidecar requires the runtime dir to pre-exist and returns
+/// `MissingRuntimeDir` if it does not. Nothing in the prior code created it.
+/// This function is called best-effort in `spawn_session` BEFORE `PtyAdapter::spawn`.
+///
+/// `dir` is the resolved runtime dir string (may be empty when the platform data
+/// dir cannot be determined — that is silently ignored).
+pub(crate) fn ensure_runtime_dir(dir: &str) -> std::io::Result<()> {
+    if dir.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)
+}
+
+/// W2 FIX: opportunistic best-effort removal of a session's own stale `.state` file
+/// before a new PTY is spawned with the same id.
+///
+/// Session-id reuse is not provably impossible (e.g. wrapped counter, persistence
+/// cleared, or test harness). A stale state file from a prior session with the same
+/// id would be rejected by `StateFileReader` (D23 session_id correlation), but the
+/// design §6 calls for a pre-spawn sweep: `NotFound` is silently tolerated.
+///
+/// This is a separate function so tests can assert it was called without touching the
+/// real FS (pass a recording closure).
+pub(crate) fn remove_stale_state_file(runtime_dir: &str, session_id: &str) -> std::io::Result<()> {
+    if runtime_dir.is_empty() {
+        return Ok(());
+    }
+    let path = format!("{runtime_dir}/spectty-{session_id}.state");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // tolerated
+        Err(e) => Err(e),
+    }
+}
+
+/// W1 FIX: delete ALL `spectty-{session_id}.*.state.tmp` files in the runtime dir.
+///
+/// The sidecar names its tmp file `spectty-{id}.{pid}.state.tmp` (PID-unique per
+/// invocation). The old cleanup code deleted `spectty-{id}.state.tmp` (i.e., the
+/// state file with `.tmp` appended), which never matched. This function scans the
+/// runtime dir for any file matching the PID-wildcard pattern and removes all hits.
+///
+/// Returns `Ok(())` when the dir does not exist or is otherwise unreadable
+/// (best-effort, consistent with the state file cleanup policy).
+pub(crate) fn remove_stale_tmp_files(runtime_dir: &str, session_id: &str) -> std::io::Result<()> {
+    if runtime_dir.is_empty() {
+        return Ok(());
+    }
+    let prefix = format!("spectty-{session_id}.");
+    let suffix = ".state.tmp";
+    let entries = match std::fs::read_dir(runtime_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with(&prefix) && name.ends_with(suffix) {
+                // Best-effort removal — ignore individual file errors.
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Spawn an agent session in a real PTY, wire BOTH the M1 render path AND the M2
 /// OutputSignal status pipeline, mint + register the session, and return its id.
 ///
@@ -437,13 +505,28 @@ pub async fn spawn_session(
             user_command: agent.command.clone(),
         })
     };
+    // C2 FIX: pass spec.env into PtySpawnConfig so SPECTTY_SESSION_ID (and any other
+    // LaunchSpec env pairs) reach the PTY child process. Without this the sidecar
+    // never sees its session id and the hook pipeline is dead end-to-end.
     let cfg = PtySpawnConfig {
         program: spec.program,
         args: spec.args,
         cwd: Some(spec.cwd),
         cols: spec.cols,
         rows: spec.rows,
+        env: spec.env,
     };
+
+    // C3 FIX: ensure the spectty runtime dir exists before spawning the PTY so
+    // the spectty-hook sidecar can write its state file. Best-effort: a failure
+    // does NOT abort the spawn (the hook pipeline will be inactive but the session
+    // still works; the sidecar exits non-zero silently).
+    let runtime_dir_for_spawn = crate::spectty_runtime_dir();
+    let _ = ensure_runtime_dir(&runtime_dir_for_spawn);
+
+    // W2 FIX: opportunistic sweep of any stale state file left by a prior session
+    // with the same id. Design §6: NotFound is silently tolerated.
+    let _ = remove_stale_state_file(&runtime_dir_for_spawn, &id.0);
 
     // Steps 5,7,8 routed through `finish_spawn_impl`: open the PTY, wire the read/signal
     // threads, store the live PTY. If ANY of those fails, the seam removes the orphaned
@@ -466,6 +549,18 @@ pub async fn spawn_session(
             // and cannot borrow `State`. Resolving the runner kind again inside the
             // thread keeps the pipeline self-contained.
             let stop = Arc::new(AtomicBool::new(false));
+            // C1 FIX (D24): only pass the real runtime_dir when hooks are provisioned
+            // for this session (i.e. the agent requires_provisioning and a hooks handle
+            // was injected). For Generic agents (no hooks), pass empty string so
+            // hook_reader.path() is empty → poll always returns None → scraping drives
+            // all transitions as in M2. For Cooperative agents with hooks, the non-empty
+            // path activates the hook-gating in run_signal_loop that suppresses a single-
+            // tick scraping Ready from flipping Running→Idle (only a hook Stop can do that).
+            let hook_runtime_dir = if hooks_handle_for_state.is_some() {
+                crate::spectty_runtime_dir()
+            } else {
+                String::new()
+            };
             let reader_thread = spawn_session_threads(
                 app.clone(),
                 id.clone(),
@@ -474,9 +569,8 @@ pub async fn spawn_session(
                 Arc::clone(&stop),
                 runner_kind,
                 Arc::clone(sessions.inner()),
-                // WU-8.8: supply the real spectty_runtime_dir() so the hook reader can
-                // poll the state file written by the spectty-hook sidecar (D24/D25).
-                crate::spectty_runtime_dir(),
+                // WU-8.8 / C1 FIX: runtime_dir is non-empty only when hooks are active.
+                hook_runtime_dir,
                 id.0.clone(),
             )?;
 
@@ -553,11 +647,20 @@ pub async fn close_session(
         Ok(())
     };
 
-    // Delete state file and its .tmp twin (best-effort — NotFound silently ignored).
+    // Delete state file and its .tmp twins (best-effort — NotFound silently ignored).
+    // W1 FIX: the sidecar writes spectty-{id}.{pid}.state.tmp (PID-unique), so we
+    // scan the runtime dir for all matching spectty-{id}.*.state.tmp files rather than
+    // deleting a single fixed path that never matches the real tmp names.
     let state_path = state_file_path.clone();
-    let tmp_path = format!("{state_file_path}.tmp");
+    // Derive runtime_dir from state_file_path: take the parent dir component.
+    let runtime_dir_for_close = std::path::Path::new(&state_file_path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let session_id_for_close = id.0.clone();
     let delete_state = move |_: &str| std::fs::remove_file(&state_path);
-    let delete_state_tmp = move |_: &str| std::fs::remove_file(&tmp_path);
+    let delete_state_tmp =
+        move |_: &str| remove_stale_tmp_files(&runtime_dir_for_close, &session_id_for_close);
 
     close_session_impl_with_hooks(
         &id,
@@ -1272,5 +1375,134 @@ mod tests {
             AgentStatus::Running,
             "a write via the signal thread's Arc must be visible through the read Arc"
         );
+    }
+
+    // ── C3 RED: runtime dir creation ─────────────────────────────────────────
+    // The spectty-hook sidecar requires the runtime dir to exist at spawn time.
+    // ensure_runtime_dir must create it (create_dir_all, idempotent).
+    #[test]
+    fn ensure_runtime_dir_creates_missing_directory() {
+        use super::ensure_runtime_dir;
+        let tmp = std::env::temp_dir().join("spectty_ensure_runtime_dir_test");
+        let subdir = tmp.join("sub").join("spectty").join("runtime");
+        // Clean up any leftover from a prior run.
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!subdir.exists(), "pre-condition: dir must not exist");
+
+        ensure_runtime_dir(subdir.to_str().unwrap())
+            .expect("ensure_runtime_dir must create the directory");
+
+        assert!(
+            subdir.is_dir(),
+            "ensure_runtime_dir must create the directory and all parents"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ensure_runtime_dir_is_idempotent() {
+        use super::ensure_runtime_dir;
+        let tmp = std::env::temp_dir().join("spectty_ensure_runtime_dir_idempotent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Calling twice must not error.
+        ensure_runtime_dir(tmp.to_str().unwrap()).expect("first call ok");
+        ensure_runtime_dir(tmp.to_str().unwrap())
+            .expect("second call (idempotent) must also be ok");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ensure_runtime_dir_empty_string_is_noop() {
+        use super::ensure_runtime_dir;
+        // An empty runtime_dir (platform dir unavailable) must be silently ignored.
+        assert!(ensure_runtime_dir("").is_ok());
+    }
+
+    // ── W2 RED: stale-state sweep ─────────────────────────────────────────────
+    // Design §6: best-effort remove_file of spectty-{id}.state before spawn.
+    #[test]
+    fn remove_stale_state_file_deletes_existing_file() {
+        use super::remove_stale_state_file;
+        let tmp = std::env::temp_dir().join("spectty_stale_state_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let session_id = "stale-session-w2";
+        let state_path = tmp.join(format!("spectty-{session_id}.state"));
+        std::fs::write(
+            &state_path,
+            r#"{"event":"Stop","ts":9,"session_id":"stale"}"#,
+        )
+        .unwrap();
+        assert!(state_path.exists(), "pre-condition: stale file must exist");
+
+        remove_stale_state_file(tmp.to_str().unwrap(), session_id)
+            .expect("remove_stale_state_file must succeed");
+
+        assert!(!state_path.exists(), "stale state file must be removed");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn remove_stale_state_file_tolerates_absent_file() {
+        use super::remove_stale_state_file;
+        // NotFound must be silently ignored — session may never have had a prior state file.
+        assert!(
+            remove_stale_state_file("/tmp/no_such_spectty_runtime_dir_w2", "no-such-session")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remove_stale_state_file_empty_dir_is_noop() {
+        use super::remove_stale_state_file;
+        assert!(remove_stale_state_file("", "any").is_ok());
+    }
+
+    // ── W1 RED: tmp cleanup formula ───────────────────────────────────────────
+    // The sidecar writes spectty-{id}.{pid}.state.tmp; the old cleanup deleted
+    // spectty-{id}.state.tmp (which never matched). remove_stale_tmp_files must
+    // find and delete all PID-suffixed variants.
+    #[test]
+    fn remove_stale_tmp_files_deletes_pid_suffixed_tmp_files() {
+        use super::remove_stale_tmp_files;
+        let tmp = std::env::temp_dir().join("spectty_stale_tmp_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let session_id = "tmp-session-w1";
+
+        // Create two PID-suffixed tmp files (simulating two concurrent sidecar invocations).
+        let tmp1 = tmp.join(format!("spectty-{session_id}.12345.state.tmp"));
+        let tmp2 = tmp.join(format!("spectty-{session_id}.67890.state.tmp"));
+        // Create an unrelated file that must NOT be deleted.
+        let unrelated = tmp.join("spectty-other-session.99999.state.tmp");
+        std::fs::write(&tmp1, b"tmp1").unwrap();
+        std::fs::write(&tmp2, b"tmp2").unwrap();
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        remove_stale_tmp_files(tmp.to_str().unwrap(), session_id)
+            .expect("remove_stale_tmp_files must succeed");
+
+        assert!(!tmp1.exists(), "PID-suffixed tmp file 1 must be removed");
+        assert!(!tmp2.exists(), "PID-suffixed tmp file 2 must be removed");
+        assert!(
+            unrelated.exists(),
+            "unrelated session tmp file must NOT be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn remove_stale_tmp_files_tolerates_absent_dir() {
+        use super::remove_stale_tmp_files;
+        // Dir doesn't exist → Ok (best-effort).
+        assert!(remove_stale_tmp_files("/tmp/no_such_spectty_runtime_dir_w1_test", "any").is_ok());
+    }
+
+    #[test]
+    fn remove_stale_tmp_files_empty_dir_is_noop() {
+        use super::remove_stale_tmp_files;
+        assert!(remove_stale_tmp_files("", "any").is_ok());
     }
 }
