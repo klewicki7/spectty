@@ -23,7 +23,8 @@
 //!
 //! - [`observe_and_diff`] — the PURE detect→transition→diff step (9.3), mirroring
 //!   M1's `forward_step` testability discipline.
-//! - [`signal_try_send`] / [`signal_channel`] — the bounded drop-oldest seam (9.4).
+//! - [`signal_try_send`] / [`signal_channel`] — the bounded drop-on-full / drop-newest
+//!   seam (9.4).
 //! - [`run_signal_loop`] — the THIRD thread's loop: `recv_timeout(QUIESCE)` ticks so
 //!   `idle_ms`/`is_active` advance while the PTY is quiescent (the M1 R3 insight),
 //!   `producer.ingest` → `clock.now()` stamp → `producer.snapshot` → `observe_and_diff`
@@ -103,9 +104,9 @@ pub fn observe_and_diff(
     sessions.apply_observed(id, observed)
 }
 
-/// Build the bounded, drop-oldest signal tee channel (D9). The read thread holds
-/// the [`SyncSender`] and feeds it with [`signal_try_send`]; the signal thread owns
-/// the [`Receiver`].
+/// Build the bounded, drop-on-full / drop-newest signal tee channel (D9). The read
+/// thread holds the [`SyncSender`] and feeds it with [`signal_try_send`]; the signal
+/// thread owns the [`Receiver`].
 #[must_use]
 pub fn signal_channel(cap: usize) -> (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) {
     std::sync::mpsc::sync_channel(cap)
