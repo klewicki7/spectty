@@ -173,6 +173,11 @@ impl HookCommandEntry {
 /// [{type, command, args}] }]` — more nested than `mcpServers`. The owned-key predicate
 /// changes: we own ROWS whose inner `hooks[].command` == our sidecar path, not a named
 /// key. Retract removes only those rows, leaving foreign rows + empty event arrays intact.
+///
+/// **Inner-granularity removal (C1 fix)**: when the "remove owned rows" step runs, it
+/// removes individual inner `hooks[]` entries whose `command == entry.command`, then
+/// drops an outer element only when its `hooks` array becomes empty afterward. A foreign
+/// command co-located in the same outer element MUST survive with its order preserved.
 pub fn inject_spectty_hooks(
     current_json: &str,
     events: &[(String, HookCommandEntry, Option<String>)],
@@ -194,10 +199,12 @@ pub fn inject_spectty_hooks(
             .as_array_mut()
             .ok_or_else(|| ProvisioningError::Parse(format!("`hooks.{event_name}` is not an array")))?;
 
-        // Remove any existing Spectty-owned rows for this event (idempotent replace).
-        event_array.retain(|element| !is_spectty_hook_element(element, &entry.command));
+        // Remove any existing Spectty-owned inner commands at fine-grained level,
+        // then drop the outer element only if its hooks[] array becomes empty.
+        // This preserves foreign commands co-located in the same matcher group.
+        remove_inner_spectty_commands(event_array, &entry.command);
 
-        // Append the new Spectty row.
+        // Append the new Spectty row (always as its own outer element).
         event_array.push(entry.to_hook_list_element(matcher.as_deref()));
     }
 
@@ -207,8 +214,10 @@ pub fn inject_spectty_hooks(
 /// Retract ONLY Spectty-owned rows from every `hooks.<EventName>[]`, leaving every
 /// foreign hook entry intact. Idempotent: retracting absent rows is a no-op.
 ///
-/// Spectty owns a row when its inner `hooks[].command` equals `hook_command` (the
-/// resolved path of the `spectty-hook` binary).
+/// Spectty owns individual inner `hooks[]` entries whose `command` equals
+/// `hook_command`. An outer element is removed only when ALL of its inner entries
+/// are owned by Spectty (i.e. its `hooks[]` array becomes empty after removal).
+/// A foreign command co-located in the same outer element MUST survive.
 pub fn retract_spectty_hooks(
     current_json: &str,
     hook_command: &str,
@@ -218,7 +227,7 @@ pub fn retract_spectty_hooks(
     if let Some(hooks_map) = root.get_mut("hooks").and_then(Value::as_object_mut) {
         for event_array in hooks_map.values_mut() {
             if let Some(arr) = event_array.as_array_mut() {
-                arr.retain(|element| !is_spectty_hook_element(element, hook_command));
+                remove_inner_spectty_commands(arr, hook_command);
             }
         }
     }
@@ -226,21 +235,34 @@ pub fn retract_spectty_hooks(
     serialize_pretty(&Value::Object(root))
 }
 
-/// Returns `true` if a hook-list element is owned by Spectty: i.e. any inner
-/// `hooks[].command` equals `hook_command`.
-fn is_spectty_hook_element(element: &Value, hook_command: &str) -> bool {
-    element
-        .get("hooks")
-        .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks.iter().any(|h| {
+/// Remove Spectty-owned inner commands at fine-grained granularity.
+///
+/// For each outer element in `event_array`:
+/// 1. Remove inner `hooks[]` entries whose `command == hook_command`.
+/// 2. If the outer element's `hooks[]` array is now EMPTY, remove the outer element.
+///
+/// Foreign commands co-located in the same outer element survive with order preserved.
+fn remove_inner_spectty_commands(event_array: &mut Vec<Value>, hook_command: &str) {
+    // Mutate each outer element's inner `hooks[]` in-place, then drop elements
+    // whose inner array became empty.
+    for element in event_array.iter_mut() {
+        if let Some(inner_hooks) = element.get_mut("hooks").and_then(Value::as_array_mut) {
+            inner_hooks.retain(|h| {
                 h.get("command")
                     .and_then(Value::as_str)
-                    .map(|c| c == hook_command)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+                    .map(|c| c != hook_command)
+                    .unwrap_or(true) // keep entries without a command field
+            });
+        }
+    }
+    // Drop outer elements whose hooks[] became empty.
+    event_array.retain(|element| {
+        element
+            .get("hooks")
+            .and_then(Value::as_array)
+            .map(|h| !h.is_empty())
+            .unwrap_or(true) // keep elements without a hooks field (shouldn't exist but be safe)
+    });
 }
 
 #[cfg(test)]
@@ -743,5 +765,134 @@ mod tests {
         let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
         let err = inject_spectty_hooks("{not json", &events).expect_err("must error");
         assert!(matches!(err, ProvisioningError::Parse(_)));
+    }
+
+    // ── C1 RED TEST: retract must operate at inner-command granularity ─────────
+    //
+    // When a user's notifier and the spectty-hook share ONE outer matcher-group
+    // element (same `hooks[]` array), retract MUST remove ONLY the inner entry
+    // whose command == spectty path, and MUST NOT delete the outer element.
+    // The user's notifier command MUST survive with its value intact.
+    //
+    // This test is RED against the CURRENT code because `is_spectty_hook_element`
+    // returns true for the whole outer element (any inner command matches), and
+    // `retain(!is_spectty_hook_element)` then drops the ENTIRE element.
+    #[test]
+    fn retract_removes_only_inner_spectty_command_keeps_foreign_co_located_in_same_group() {
+        // Config: ONE outer element under Stop containing two inner hook commands —
+        // a foreign user-notify AND the spectty-hook co-located in the same `hooks[]`.
+        let config = serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "error",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/user-notify", "args": ["--on-error"] },
+                            { "type": "command", "command": "/usr/local/bin/spectty-hook", "args": ["--event", "Stop"] }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .expect("fixture serializes");
+
+        let retracted =
+            retract_spectty_hooks(&config, "/usr/local/bin/spectty-hook").expect("retract ok");
+        let retracted_value: Value = serde_json::from_str(&retracted).expect("valid after retract");
+
+        // The outer element MUST NOT be deleted — Stop array still has one element.
+        let stop_arr = retracted_value["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop must still be an array");
+        assert_eq!(
+            stop_arr.len(),
+            1,
+            "outer element must survive (hooks array has foreign command); got: {stop_arr:?}"
+        );
+
+        // The foreign user-notify command MUST still exist inside that element.
+        let foreign_survives = stop_arr.iter().any(|el| {
+            el.get("hooks")
+                .and_then(Value::as_array)
+                .map(|h| {
+                    h.iter().any(|inner| {
+                        inner.get("command")
+                            .and_then(Value::as_str)
+                            .map(|c| c == "/usr/local/bin/user-notify")
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            foreign_survives,
+            "foreign user-notify command MUST survive retract (co-located in same group)"
+        );
+
+        // The spectty-hook command MUST be gone from the inner hooks[].
+        let spectty_gone = stop_arr.iter().all(|el| {
+            el.get("hooks")
+                .and_then(Value::as_array)
+                .map(|h| {
+                    h.iter().all(|inner| {
+                        inner.get("command")
+                            .and_then(Value::as_str)
+                            .map(|c| c != "/usr/local/bin/spectty-hook")
+                            .unwrap_or(true)
+                    })
+                })
+                .unwrap_or(true)
+        });
+        assert!(
+            spectty_gone,
+            "spectty-hook inner command MUST be removed after retract"
+        );
+    }
+
+    // Also verify inject's "remove owned rows first" step uses inner-granularity
+    // so re-inject on a co-located group is idempotent and never strips foreign cmd.
+    #[test]
+    fn inject_retains_foreign_co_located_command_when_reinserting_spectty() {
+        // Start with a group that already has user-notify + spectty-hook together.
+        let config = serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "error",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/user-notify", "args": [] },
+                            { "type": "command", "command": "/usr/local/bin/spectty-hook", "args": ["--event", "Stop"] }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .expect("fixture serializes");
+
+        let events = vec![("Stop".to_string(), hook_entry_stop(), None)];
+        let injected = inject_spectty_hooks(&config, &events).expect("inject ok");
+        let injected_value: Value = serde_json::from_str(&injected).expect("valid after inject");
+
+        // Foreign user-notify must still exist after re-inject.
+        let stop_arr = injected_value["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop must be array");
+        let notify_survives = stop_arr.iter().any(|el| {
+            el.get("hooks")
+                .and_then(Value::as_array)
+                .map(|h| {
+                    h.iter().any(|inner| {
+                        inner.get("command")
+                            .and_then(Value::as_str)
+                            .map(|c| c == "/usr/local/bin/user-notify")
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            notify_survives,
+            "foreign user-notify must survive re-inject on co-located group"
+        );
     }
 }
