@@ -267,7 +267,7 @@ WU-8 (spectty-mcp stub, independent) ──────────────�
 
 - [x] 11.1 `#[cfg(unix)]` `real_pty_generic_reaches_running_then_completed` — spawn a deterministic Generic command (`/bin/sh -c "printf ...; sleep"`), drive the REAL read thread → OutputSignal producer → `detect_status`, assert status reaches `Running` then `Completed` on exit (Generic baseline, exit-criterion 5 in miniature, no wall-clock idle). Lives with WU-9. `[REQ:roadmap-exit/criterion-5]` `[unit/ci]` — _PR5a: in `session_runtime.rs` tests; real `PtyAdapter::spawn` → real read thread → production `signal_channel`+`signal_try_send` → real `run_signal_loop` (emit collected into a Vec). Uses the EOF/exit path (not idle), passes on macOS in ~0.2s._
 - [x] 11.2 `spectty_mcp_stdio_handshake` — spawn the built `spectty-mcp` binary, send `initialize` + `tools/list` over stdio, assert the 5 tool names come back AND an unknown `tools/call` returns `-32601` (the R4 contract end-to-end). Lives with WU-8 (`crates/spectty-mcp/tests/stdio_handshake.rs`, via `CARGO_BIN_EXE_spectty-mcp`). Framing pinned to **line-delimited JSON-RPC** (write → flush → close stdin → drain to EOF; child exits 0). `[REQ:provisioning-port/spectty-mcp-stub]` `[unit/ci]` `[D15]`
-- [ ] **Gate (WU-11)**: `cargo test --workspace` green incl. the `#[cfg(unix)]` integration tests on macOS; fmt/clippy clean; `cargo deny ...` exits 0.
+- [x] **Gate (WU-11)**: `cargo test --workspace` green incl. the `#[cfg(unix)]` integration tests on macOS; fmt/clippy clean; `cargo deny ...` exits 0.
 
 ---
 
