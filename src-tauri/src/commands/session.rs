@@ -117,6 +117,54 @@ pub fn spawn_session_impl(
     Ok(SpawnOutcome { id, handle })
 }
 
+/// Best-effort teardown of a spawn that failed AFTER [`spawn_session_impl`] already
+/// inserted the Session and (for a cooperative agent) injected provisioning.
+///
+/// Without this, a post-insert failure (the real PTY refusing to open, the read/signal
+/// threads failing to spawn, or the `PtyRegistry` lock being poisoned) would LEAK an
+/// orphaned session in `list_sessions` AND an un-retracted `spectty_*` entry in the
+/// user's real `~/.claude.json`. Cleanup ALWAYS removes the session; retraction is
+/// best-effort (a leaked key is harmless — D14 — and the next clean spawn/close
+/// retracts it), so a retract error never aborts the removal and never panics.
+fn cleanup_failed_spawn(
+    sessions: &SessionRegistry,
+    provisioner: &dyn ProvisioningPort,
+    id: &SessionId,
+    handle: Option<&ProvisioningHandle>,
+) {
+    if let Some(handle) = handle {
+        // Best-effort: ignore the error but ALWAYS proceed to remove the session.
+        let _ = provisioner.retract(handle);
+    }
+    sessions.remove(id);
+}
+
+/// The testable seam for the post-insert half of `spawn_session` (design §6.1 steps
+/// 5, 7, 8): run the injected `spawn_pty` work (open the real PTY, wire the read/signal
+/// threads, store the live `PtyState`) and, on ANY error, run [`cleanup_failed_spawn`]
+/// BEFORE returning the error so a failed spawn never leaks the orphaned session or the
+/// injected provisioning.
+///
+/// `spawn_pty` is injected as a closure so this seam is unit-testable with a forced
+/// post-insert failure and a recording provisioner — NO real PTY and NO `AppHandle`.
+/// In production the closure performs `PtyAdapter::spawn` + `spawn_session_threads` +
+/// the `PtyRegistry` insert; any of those three error paths flows through the SAME
+/// cleanup here.
+fn finish_spawn_impl<T>(
+    outcome: SpawnOutcome,
+    sessions: &SessionRegistry,
+    provisioner: &dyn ProvisioningPort,
+    spawn_pty: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match spawn_pty() {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            cleanup_failed_spawn(sessions, provisioner, &outcome.id, outcome.handle.as_ref());
+            Err(e)
+        }
+    }
+}
+
 /// The testable core of `close_session`: kill the PTY (M1 path) THEN retract the
 /// injected provisioning for the session's stored scope THEN remove from the
 /// registry. ORDER MATTERS — the PTY child must die before we touch the config so a
@@ -228,35 +276,49 @@ pub async fn spawn_session(
         cols: spec.cols,
         rows: spec.rows,
     };
-    let (adapter, reader) = PtyAdapter::spawn(&cfg).map_err(|e| e.to_string())?;
 
-    // Step 7: wire the render path (M1) AND the status pipeline (M2) on dedicated
-    // threads. The signal pipeline gets its own `AgentRunnerRegistry` + `SystemClock`
-    // because the read/signal threads outlive this command frame and cannot borrow
-    // `State`. Resolving the runner kind again inside the thread keeps the pipeline
-    // self-contained.
-    let stop = Arc::new(AtomicBool::new(false));
-    let reader_thread = spawn_session_threads(
-        app.clone(),
-        id.clone(),
-        reader,
-        on_output,
-        Arc::clone(&stop),
-        runner_kind,
-        Arc::clone(sessions.inner()),
+    // Steps 5,7,8 routed through `finish_spawn_impl`: open the PTY, wire the read/signal
+    // threads, store the live PTY. If ANY of those fails, the seam removes the orphaned
+    // session AND retracts the injected provisioning BEFORE surfacing the error, so a
+    // failed spawn never leaks a phantom session or a `spectty_*` config entry.
+    let handle_for_state = outcome.handle.clone();
+    finish_spawn_impl(
+        outcome,
+        sessions.inner(),
+        provisioner.inner().as_ref(),
+        || {
+            let (adapter, reader) = PtyAdapter::spawn(&cfg).map_err(|e| e.to_string())?;
+
+            // Step 7: wire the render path (M1) AND the status pipeline (M2) on dedicated
+            // threads. The signal pipeline gets its own `AgentRunnerRegistry` +
+            // `SystemClock` because the read/signal threads outlive this command frame
+            // and cannot borrow `State`. Resolving the runner kind again inside the
+            // thread keeps the pipeline self-contained.
+            let stop = Arc::new(AtomicBool::new(false));
+            let reader_thread = spawn_session_threads(
+                app.clone(),
+                id.clone(),
+                reader,
+                on_output,
+                Arc::clone(&stop),
+                runner_kind,
+                Arc::clone(sessions.inner()),
+            )?;
+
+            // Step 8: store the live PTY (with its provisioning handle for retraction).
+            let state = PtyState {
+                transport: Box::new(adapter),
+                stop,
+                reader_thread: Some(reader_thread),
+                provisioning: handle_for_state,
+            };
+            ptys.0
+                .lock()
+                .map_err(|_| "pty registry mutex poisoned".to_string())?
+                .insert(id.0.clone(), state);
+            Ok(())
+        },
     )?;
-
-    // Step 8: store the live PTY (with its provisioning handle for retraction).
-    let state = PtyState {
-        transport: Box::new(adapter),
-        stop,
-        reader_thread: Some(reader_thread),
-        provisioning: outcome.handle,
-    };
-    ptys.0
-        .lock()
-        .map_err(|_| "pty registry mutex poisoned".to_string())?
-        .insert(id.0.clone(), state);
 
     // Step 9: announce the new session to the UI.
     let summary = sessions
@@ -608,6 +670,132 @@ mod tests {
         assert!(
             sessions.get(&id).is_none(),
             "close must remove the session from the registry last"
+        );
+    }
+
+    // Fix #1: a failure on ANY post-insert spawn step must clean up the orphan — the
+    // already-inserted Session is removed AND the already-injected provisioning is
+    // retracted — so a failed spawn never leaks a phantom session or a `spectty_*`
+    // entry in the user's real `~/.claude.json`.
+    #[test]
+    fn spawn_session_cleans_up_when_pty_spawn_fails() {
+        let sessions = SessionRegistry::default();
+        let runners = AgentRunnerRegistry::with_builtin();
+        let provisioner = RecordingProvisioner::default();
+
+        // Steps 1–6: a cooperative spawn injects + inserts (the leak surface).
+        let outcome = spawn_session_impl(
+            &claude_spec(),
+            "/repo",
+            "Fix the auth bug",
+            80,
+            24,
+            &sessions,
+            &runners,
+            &provisioner,
+            ProvisioningScope::Global,
+            spectty_core::Timestamp(0),
+        )
+        .expect("spawn ok");
+        let id = outcome.id.clone();
+        assert!(
+            sessions.get(&id).is_some(),
+            "session inserted before pty open"
+        );
+
+        // The post-insert PTY/thread/registry work fails (e.g. PtyAdapter::spawn errs).
+        let result: Result<(), String> =
+            finish_spawn_impl(outcome, &sessions, &provisioner, || {
+                Err("pty open failed".to_string())
+            });
+
+        assert!(
+            result.is_err(),
+            "a failed post-insert step surfaces the error"
+        );
+        assert!(
+            sessions.get(&id).is_none(),
+            "a failed spawn must REMOVE the orphaned session (no phantom in list_sessions)"
+        );
+        assert_eq!(
+            *provisioner.retracts.lock().unwrap(),
+            vec![ProvisioningScope::Global],
+            "a failed spawn must RETRACT the injected provisioning (no leaked spectty_* key)"
+        );
+    }
+
+    // Fix #1: a Generic (no provisioning) spawn that fails post-insert still removes the
+    // orphan but does NOT call retract (nothing was injected).
+    #[test]
+    fn spawn_session_cleanup_removes_generic_session_without_retract() {
+        let sessions = SessionRegistry::default();
+        let runners = AgentRunnerRegistry::with_builtin();
+        let provisioner = RecordingProvisioner::default();
+
+        let outcome = spawn_session_impl(
+            &generic_spec(),
+            "/repo",
+            "scratch shell",
+            80,
+            24,
+            &sessions,
+            &runners,
+            &provisioner,
+            ProvisioningScope::Global,
+            spectty_core::Timestamp(0),
+        )
+        .expect("spawn ok");
+        let id = outcome.id.clone();
+
+        let result: Result<(), String> =
+            finish_spawn_impl(outcome, &sessions, &provisioner, || {
+                Err("thread wiring failed".to_string())
+            });
+
+        assert!(result.is_err());
+        assert!(
+            sessions.get(&id).is_none(),
+            "a failed Generic spawn must still remove the orphaned session"
+        );
+        assert!(
+            provisioner.retracts.lock().unwrap().is_empty(),
+            "a Generic spawn injected nothing, so cleanup must NOT retract"
+        );
+    }
+
+    // Fix #2 (the #1 load-bearing property): the SHARED `Arc<SessionRegistry>` the
+    // signal thread holds and the read path are the SAME registry. A status update
+    // applied through the thread's Arc clone is visible through the original Arc. A
+    // future refactor that accidentally forks the registry (deep clone) breaks this.
+    #[test]
+    fn status_update_via_thread_arc_is_visible_through_read_arc() {
+        use spectty_core::entities::agent_status::Observed;
+
+        let reg = Arc::new(SessionRegistry::default());
+        let id = reg.mint_id();
+        reg.insert(Session {
+            id: id.clone(),
+            workspace: WorkspaceId("/repo".to_string()),
+            agent: generic_spec(),
+            status: AgentStatus::Starting,
+            title: "shared-registry probe".to_string(),
+            created_at: spectty_core::Timestamp(0),
+        });
+
+        // What `spawn_session` hands the signal thread: an `Arc::clone`, NOT a deep copy.
+        let thread_clone = Arc::clone(&reg);
+        let changed = thread_clone.apply_observed(&id, Observed::Working);
+        assert_eq!(
+            changed,
+            Some(AgentStatus::Running),
+            "Starting + Working transitions to Running"
+        );
+
+        // Visible through the ORIGINAL read Arc — same underlying registry.
+        assert_eq!(
+            reg.get(&id).expect("session present").status,
+            AgentStatus::Running,
+            "a write via the signal thread's Arc must be visible through the read Arc"
         );
     }
 }
