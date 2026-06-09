@@ -14,6 +14,18 @@
 use serde::Deserialize;
 use spectty_core::{Observed, ProvisioningError};
 
+/// The `matcher` value Spectty registers on the Claude Code `Notification` hook to
+/// capture only permission-request prompts (Slice 2, D21).
+///
+/// Sourced from the Claude Code Notification Hook Event docs
+/// (<https://code.claude.com/docs/en/hooks>): permission-request notifications carry
+/// `notification_type == "permission_prompt"`. Claude Code's hook `matcher` field
+/// filters on this string so only permission prompts invoke the sidecar; unrelated
+/// notifications (info banners, etc.) do NOT fire the hook.
+///
+/// This is an EMPIRICAL adapter-level constant — it MUST NOT live in `crates/core`.
+pub const PERMISSION_PROMPT_MATCHER: &str = "permission_prompt";
+
 /// Lifecycle events the Spectty hook sidecar can report.
 ///
 /// Variant names match the `--event <Name>` CLI argument and the `"event"` field in
@@ -194,6 +206,38 @@ mod tests {
     #[test]
     fn event_to_observed_stop_failure_maps_to_failed() {
         assert_eq!(event_to_observed(HookEvent::StopFailure), Observed::Failed);
+    }
+
+    // ── WU-10.1 RED: 3 Slice 2 mapping assertions ─────────────────────────────
+    // These tests assert the Permission→NeedsInput, SessionEnd→Finished, and
+    // StopFailure→Failed mappings that activate Slice 2 semantics (D24).
+    // Written as part of WU-10 per the Strict TDD protocol (RED before GREEN).
+
+    #[test]
+    fn event_to_observed_permission_maps_to_needs_input_slice2() {
+        assert_eq!(
+            event_to_observed(HookEvent::Permission),
+            Observed::NeedsInput,
+            "Permission must map to NeedsInput (Running → AwaitingInput, Slice 2)"
+        );
+    }
+
+    #[test]
+    fn event_to_observed_session_end_maps_to_finished_slice2() {
+        assert_eq!(
+            event_to_observed(HookEvent::SessionEnd),
+            Observed::Finished,
+            "SessionEnd must map to Finished (* → Completed, Slice 2)"
+        );
+    }
+
+    #[test]
+    fn event_to_observed_stop_failure_maps_to_failed_slice2() {
+        assert_eq!(
+            event_to_observed(HookEvent::StopFailure),
+            Observed::Failed,
+            "StopFailure must map to Failed (* → Error, Slice 2)"
+        );
     }
 
     /// Full 5-row table test: every event maps to its design-specified Observed

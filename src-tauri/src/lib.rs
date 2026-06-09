@@ -16,7 +16,7 @@ use commands::session::HooksProvisionerState;
 use pty_state::PtyRegistry;
 use spectty_adapters::{
     AgentRunnerRegistry, ClaudeJsonProvisioner, ClaudeSettingsProvisioner, HookCommandEntry,
-    McpServerEntry, RealConfigFile, SystemClock,
+    McpServerEntry, RealConfigFile, SystemClock, PERMISSION_PROMPT_MATCHER,
 };
 use spectty_core::{ClockPort, ProvisioningPort, SessionRegistry};
 
@@ -128,12 +128,20 @@ pub fn run() {
     ));
 
     // The hooks provisioner injects the Spectty hook entries into
-    // `~/.claude/settings.json` (Global) / `.claude/settings.json` (Project). Only
-    // Slice 1 events (Stop + UserPromptSubmit) are wired here — Slice 2 extends the
-    // list in WU-10. Managed as `HooksProvisionerState` (distinct Tauri state type) so
-    // it does not collide with `Arc<dyn ProvisioningPort>` (D21).
+    // `~/.claude/settings.json` (Global) / `.claude/settings.json` (Project). All
+    // 5 events (Slice 1 + Slice 2) are wired here (WU-10).
+    //
+    // Slice 1: Stop + UserPromptSubmit (primary regression fix — Running→Idle).
+    // Slice 2: Notification/Permission (with PERMISSION_PROMPT_MATCHER) + SessionEnd +
+    //          SubagentStop/StopFailure. "SubagentStop" is the Claude Code hook event
+    //          name for subagent failure; distinct from "Stop" (clean turn end) so that
+    //          StopFailure does NOT fire on every clean stop (design §3.4).
+    //
+    // Managed as `HooksProvisionerState` (distinct Tauri state type) so it does not
+    // collide with `Arc<dyn ProvisioningPort>` (D21).
     let hook_cmd = spectty_hook_command();
     let hooks_events: Vec<(String, HookCommandEntry, Option<String>)> = vec![
+        // ── Slice 1 ──────────────────────────────────────────────────────────────
         (
             "UserPromptSubmit".to_string(),
             HookCommandEntry {
@@ -147,6 +155,38 @@ pub fn run() {
             HookCommandEntry {
                 command: hook_cmd.clone(),
                 args: vec!["--event".to_string(), "Stop".to_string()],
+            },
+            None,
+        ),
+        // ── Slice 2 ──────────────────────────────────────────────────────────────
+        (
+            // Permission prompt: Claude's `Notification` hook with the empirical
+            // `permission_prompt` matcher so ONLY permission-request notifications
+            // invoke the sidecar (unrelated notifications are filtered out).
+            "Notification".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.clone(),
+                args: vec!["--event".to_string(), "Permission".to_string()],
+            },
+            Some(PERMISSION_PROMPT_MATCHER.to_string()),
+        ),
+        (
+            // Session end: Claude's `SessionEnd` hook; no matcher needed.
+            "SessionEnd".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.clone(),
+                args: vec!["--event".to_string(), "SessionEnd".to_string()],
+            },
+            None,
+        ),
+        (
+            // Subagent failure: Claude's `SubagentStop` hook fires when a subagent
+            // (nested Claude process) stops — typically an API/tool failure. Using a
+            // distinct event name avoids double-firing on every clean `Stop`.
+            "SubagentStop".to_string(),
+            HookCommandEntry {
+                command: hook_cmd.clone(),
+                args: vec!["--event".to_string(), "StopFailure".to_string()],
             },
             None,
         ),

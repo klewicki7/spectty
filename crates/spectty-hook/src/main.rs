@@ -203,6 +203,65 @@ mod tests {
         );
     }
 
+    // ── WU-10.5: Slice 2 event names are accepted by run_with ────────────────
+    //
+    // These tests confirm that `Permission`, `SessionEnd`, and `StopFailure`
+    // are valid `--event` values through the full `run_with` path. They use a
+    // real tmpdir (created inline) to avoid the MissingRuntimeDir gate so the
+    // parse path is exercised; the actual file write is not inspected here
+    // (that behaviour is covered by handler.rs tests).
+
+    #[test]
+    fn spectty_hook_accepts_permission_event() {
+        let dir = std::env::temp_dir().join("spectty_hook_test_permission_event");
+        let _ = std::fs::create_dir_all(&dir);
+        let args: Vec<String> = vec![
+            "spectty-hook".to_string(),
+            "--event".to_string(),
+            "Permission".to_string(),
+        ];
+        let result = run_with(&args, Some("test-permission"), Some(&dir), &mut |_| None);
+        assert!(
+            result.is_ok(),
+            "Permission must be accepted as a valid event, got: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spectty_hook_accepts_session_end_event() {
+        let dir = std::env::temp_dir().join("spectty_hook_test_session_end_event");
+        let _ = std::fs::create_dir_all(&dir);
+        let args: Vec<String> = vec![
+            "spectty-hook".to_string(),
+            "--event".to_string(),
+            "SessionEnd".to_string(),
+        ];
+        let result = run_with(&args, Some("test-session-end"), Some(&dir), &mut |_| None);
+        assert!(
+            result.is_ok(),
+            "SessionEnd must be accepted as a valid event, got: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spectty_hook_accepts_stop_failure_event() {
+        let dir = std::env::temp_dir().join("spectty_hook_test_stop_failure_event");
+        let _ = std::fs::create_dir_all(&dir);
+        let args: Vec<String> = vec![
+            "spectty-hook".to_string(),
+            "--event".to_string(),
+            "StopFailure".to_string(),
+        ];
+        let result = run_with(&args, Some("test-stop-failure"), Some(&dir), &mut |_| None);
+        assert!(
+            result.is_ok(),
+            "StopFailure must be accepted as a valid event, got: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── 4.4: non-existent runtime dir → RunError::MissingRuntimeDir ──────────
     //
     // Uses the DI seam (run_with runtime_dir: Some(non_existent_path)) instead
