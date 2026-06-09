@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/adapters",
     "crates/spectty-mcp",
+    "crates/spectty-hook",
     "src-tauri",
 ]
 

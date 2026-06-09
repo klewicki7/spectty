@@ -1,6 +1,6 @@
 # M3 — Hook-Based Status Detection — Task Checklist
 
-> **STATUS: PLANNING.** Work units defined, not yet started.
+> **STATUS: IN PROGRESS.** PR-1a (WU-1 + WU-2 + WU-3) COMPLETE. PR-1b-i onward pending.
 >
 > SDD tasks phase. Consumes `sdd/M3-hook-status-detection/spec` (obs #830) +
 > `openspec/changes/M3-hook-status-detection/specs/*` and
@@ -80,18 +80,18 @@ WU-1 (manifests) ─────────────────────
 **Rollback**: revert → no new crate; M2 still builds.
 **PR slice**: PR-1 (Slice 1 foundation).
 
-- [ ] 1.1 Create `crates/spectty-hook/Cargo.toml` — `[[bin]] name = "spectty-hook"`, deps
+- [x] 1.1 Create `crates/spectty-hook/Cargo.toml` — `[[bin]] name = "spectty-hook"`, deps
   `serde` + `serde_json` ONLY (NO `spectty-core`, NO `tauri`, mirrors `crates/spectty-mcp/Cargo.toml`).
   `[REQ:spectty-hook-sidecar/atomic-write]` `[ci]` `[D25]`
-- [ ] 1.2 Add `"crates/spectty-hook"` to the workspace `members` list in root `Cargo.toml`.
+- [x] 1.2 Add `"crates/spectty-hook"` to the workspace `members` list in root `Cargo.toml`.
   `[REQ:bundling/externalBin]` `[ci]` `[D25]`
 - [ ] 1.3 Add `bundle.externalBin` to `src-tauri/tauri.conf.json` declaring BOTH
   `"binaries/spectty-mcp"` AND `"binaries/spectty-hook"` (target-triple-suffixed per Tauri sidecar
   convention). This closes M2 L2 for spectty-mcp and establishes bundling for spectty-hook.
   `[REQ:bundling/externalBin → Scenario: tauri.conf.json contains both sidecar entries]` `[ci]` `[D25]`
-- [ ] 1.4 Confirm `crates/core/Cargo.toml` runtime deps UNCHANGED (serde + thiserror only).
+- [x] 1.4 Confirm `crates/core/Cargo.toml` runtime deps UNCHANGED (serde + thiserror only).
   `[REQ:hook-provisioning/ClaudeSettingsProvisioner — CORE UNCHANGED]` `[ci]` `[D21]`
-- [ ] **Gate (WU-1)**: `cargo build --workspace` succeeds (empty spectty-hook main stub OK);
+- [x] **Gate (WU-1)**: `cargo build --workspace` succeeds (empty spectty-hook main stub OK);
   `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok`;
   `cargo fmt --all -- --check` clean.
 
@@ -113,32 +113,32 @@ SAME event; inject→retract must preserve every foreign value + key order and l
 > `hooks[].command == our sidecar path`. Retract removes only those rows. Same
 > `preserve_order` / VALUE+ORDER (not byte-identity) contract as M2.
 
-- [ ] 2.1 RED: `inject_spectty_hooks_round_trip_preserves_foreign_keys_and_order` — HAND-FORMATTED
+- [x] 2.1 RED: `inject_spectty_hooks_round_trip_preserves_foreign_keys_and_order` — HAND-FORMATTED
   `settings.json` with `permissions`, `env`, `model`, a user hook on `Stop` (foreign row on same
   event), a user hook on a different event; inject Spectty Stop+Submit hooks → retract → every
   foreign VALUE and relative key ORDER preserved, no Spectty row remains, foreign `Stop` hook
   survives. RED proven by breaking the owned-key predicate. `[REQ:hook-provisioning/ClaudeSettingsProvisioner
   → Scenario: inject adds managed hook entries and leaves foreign keys untouched]` `[unit]` `[D21]`
-- [ ] 2.2 RED: `retract_spectty_hooks_removes_only_owned_rows` — settings with BOTH Spectty-owned
+- [x] 2.2 RED: `retract_spectty_hooks_removes_only_owned_rows` — settings with BOTH Spectty-owned
   rows (command == our binary) and user-authored rows on the same event; retract removes only
   Spectty rows; foreign rows untouched. `[REQ:hook-provisioning/ClaudeSettingsProvisioner
   → Scenario: retract removes only Spectty-managed hook entries]` `[unit]` `[D21]`
-- [ ] 2.3 RED: `inject_spectty_hooks_on_empty_document_creates_hooks_key` — inject into `{}` →
+- [x] 2.3 RED: `inject_spectty_hooks_on_empty_document_creates_hooks_key` — inject into `{}` →
   valid JSON with `hooks` object, no other key created. `[REQ:hook-provisioning/ClaudeSettingsProvisioner
   → Scenario: Editing absent or empty hooks section creates valid output]` `[unit]`
-- [ ] 2.4 RED: `inject_spectty_hooks_is_idempotent` — double inject == single inject
+- [x] 2.4 RED: `inject_spectty_hooks_is_idempotent` — double inject == single inject
   (no duplicate rows). `[unit]`
-- [ ] 2.5 RED: `retract_spectty_hooks_on_file_with_no_spectty_rows_is_idempotent` — retract on
+- [x] 2.5 RED: `retract_spectty_hooks_on_file_with_no_spectty_rows_is_idempotent` — retract on
   file already clean returns same structure. `[REQ:hook-provisioning/ClaudeSettingsProvisioner
   → Scenario: retract on settings.json that has no Spectty hooks is idempotent]` `[unit]`
-- [ ] 2.6 RED: `inject_spectty_hooks_no_matcher_events_have_no_matcher_field` — inspect
+- [x] 2.6 RED: `inject_spectty_hooks_no_matcher_events_have_no_matcher_field` — inspect
   `Stop` and `UserPromptSubmit` entries in the output; neither has a `matcher` field (absent, not
   null). `[REQ:hook-status-mapping/hook-event-shape → Scenario: No-matcher events have no
   matcher field]` `[unit]`
-- [ ] 2.7 RED: `non_object_hooks_is_a_parse_error_not_data_loss` — pre-existing `"hooks": []` →
+- [x] 2.7 RED: `non_object_hooks_is_a_parse_error_not_data_loss` — pre-existing `"hooks": []` →
   `ProvisioningError::Parse`, never clobbered (mirrors M2 `non_object_mcp_servers` test).
   `[unit]`
-- [ ] 2.8 GREEN: modify `crates/adapters/src/provision/json_namespace.rs` — add
+- [x] 2.8 GREEN: modify `crates/adapters/src/provision/json_namespace.rs` — add
   `pub struct HookCommandEntry { pub command: String, pub args: Vec<String>, pub matcher:
   Option<String> }` and pure `inject_spectty_hooks(current_json: &str, events: &[(String,
   HookCommandEntry)]) -> Result<String, ProvisioningError>` + `retract_spectty_hooks(current_json:
@@ -146,9 +146,9 @@ SAME event; inject→retract must preserve every foreign value + key order and l
   rows whose `hooks[].command == hook_command`. Re-serialize with `preserve_order`.
   NO new deps (serde_json already in adapters). `[REQ:hook-provisioning/ClaudeSettingsProvisioner]`
   `[unit]` `[D21]`
-- [ ] 2.9 GREEN: export `inject_spectty_hooks` + `retract_spectty_hooks` + `HookCommandEntry` from
+- [x] 2.9 GREEN: export `inject_spectty_hooks` + `retract_spectty_hooks` + `HookCommandEntry` from
   `crates/adapters/src/provision/mod.rs` + adapters `lib.rs`. `[ci]`
-- [ ] **Gate (WU-2)**: `cargo test --workspace` green (all 7 new namespace tests); fmt clean;
+- [x] **Gate (WU-2)**: `cargo test --workspace` green (all 7 new namespace tests); fmt clean;
   clippy `-D warnings` clean; `cargo deny --manifest-path crates/core/Cargo.toml check bans` →
   `bans ok`.
 
@@ -168,22 +168,22 @@ SAME event; inject→retract must preserve every foreign value + key order and l
 > `settings_path_for_scope` lives here (separate from the hook reader logic) as a pure
 > scalar fn that tests without FS access.
 
-- [ ] 3.1 RED: `event_to_observed_table` — assert all 5 events map correctly:
+- [x] 3.1 RED: `event_to_observed_table` — assert all 5 events map correctly:
   Submit→Working, Stop→Ready, Permission→NeedsInput, SessionEnd→Finished, StopFailure→Failed.
   RED proven by swapping two entries. `[REQ:hook-status-mapping/five-hook-events
   → Scenarios: "Ready" maps ... "Working" maps ... etc]` `[unit]`
-- [ ] 3.2 RED: `parse_state_file_round_trips_all_events` — valid JSON with each of the 5
+- [x] 3.2 RED: `parse_state_file_round_trips_all_events` — valid JSON with each of the 5
   `HookEvent` names → correct `HookState`. `[REQ:pipeline-augmentation/run_signal_loop
   → Scenario: A malformed state file is silently ignored]` `[unit]`
-- [ ] 3.3 RED: `parse_state_file_returns_parse_error_on_malformed_json` + unknown event name
+- [x] 3.3 RED: `parse_state_file_returns_parse_error_on_malformed_json` + unknown event name
   → `Err(ProvisioningError::Parse)`. `[unit]`
-- [ ] 3.4 RED: `settings_path_for_scope_global` — `Global` → `~/.claude/settings.json`
+- [x] 3.4 RED: `settings_path_for_scope_global` — `Global` → `~/.claude/settings.json`
   (HOME-expanded). `[REQ:hook-provisioning/scope-path-resolver → Scenario: Global scope resolves
   to ~/.claude/settings.json]` `[unit]`
-- [ ] 3.5 RED: `settings_path_for_scope_project` — `Project("/some/repo")` →
+- [x] 3.5 RED: `settings_path_for_scope_project` — `Project("/some/repo")` →
   `/some/repo/.claude/settings.json`. `[REQ:hook-provisioning/scope-path-resolver → Scenario:
   Project scope resolves to {root}/.claude/settings.json]` `[unit]`
-- [ ] 3.6 GREEN: create `crates/adapters/src/hook/state.rs` —
+- [x] 3.6 GREEN: create `crates/adapters/src/hook/state.rs` —
   ```
   #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
   pub enum HookEvent { Submit, Stop, Permission, SessionEnd, StopFailure }
@@ -192,13 +192,13 @@ SAME event; inject→retract must preserve every foreign value + key order and l
   pub fn event_to_observed(event: HookEvent) -> Observed;
   ```
   All PURE — no I/O. `[REQ:hook-status-mapping/five-hook-events]` `[unit]` `[D22]`
-- [ ] 3.7 GREEN: add `pub fn settings_path_for_scope(scope: &ProvisioningScope) -> String` to
+- [x] 3.7 GREEN: add `pub fn settings_path_for_scope(scope: &ProvisioningScope) -> String` to
   `crates/adapters/src/provision/scope.rs` — Global → `{$HOME}/.claude/settings.json`; Project(root)
   → `{root}/.claude/settings.json`. DISTINCT from M2's `resolve_scope` (which maps to `.claude.json`/
   `.mcp.json`). `[REQ:hook-provisioning/scope-path-resolver]` `[unit]` `[D21]`
-- [ ] 3.8 GREEN: create `crates/adapters/src/hook/mod.rs` — re-exports; create
+- [x] 3.8 GREEN: create `crates/adapters/src/hook/mod.rs` — re-exports; create
   `crates/adapters/src/hook/` directory. Export from adapters `lib.rs`. `[ci]`
-- [ ] **Gate (WU-3)**: `cargo test --workspace` green (all 5 new pure tests); fmt clean;
+- [x] **Gate (WU-3)**: `cargo test --workspace` green (all 5 new pure tests); fmt clean;
   clippy `-D warnings` clean; `cargo deny ... check bans` → `bans ok`.
 
 ---
@@ -268,24 +268,24 @@ with WU-2 and WU-3.** **Blocks**: WU-9 (integration test spawns the built binary
 > settings.json — it MUST NOT touch `mcpServers`, `permissions`, `env`, `model`.
 > The composition root will manage it as a second `Arc<dyn ProvisioningPort>`.
 
-- [ ] 5.1 RED: `claude_settings_provisioner_inject_writes_correct_scope_path_and_backs_up` —
+- [x] 5.1 RED: `claude_settings_provisioner_inject_writes_correct_scope_path_and_backs_up` —
   fake `FakeConfigFile`: Global scope → writes `~/.claude/settings.json` + creates
   `.spectty.bak`; Project scope → writes `{root}/.claude/settings.json`. `[REQ:hook-provisioning/
   ClaudeSettingsProvisioner → Scenario: First write creates a .spectty.bak backup]` `[unit]` `[D21]`
-- [ ] 5.2 RED: `claude_settings_provisioner_second_write_does_not_overwrite_bak` — inject twice;
+- [x] 5.2 RED: `claude_settings_provisioner_second_write_does_not_overwrite_bak` — inject twice;
   `.spectty.bak` from first write preserved. `[REQ:hook-provisioning/ClaudeSettingsProvisioner
   → Scenario: Subsequent writes do not overwrite an existing .spectty.bak]` `[unit]`
-- [ ] 5.3 RED: `claude_settings_provisioner_retract_absent_file_is_ok` — retract when no
+- [x] 5.3 RED: `claude_settings_provisioner_retract_absent_file_is_ok` — retract when no
   settings.json exists → `Ok(())`. `[unit]`
-- [ ] 5.4 RED: `claude_settings_provisioner_retract_removes_only_spectty_rows_via_fake` — inject then
+- [x] 5.4 RED: `claude_settings_provisioner_retract_removes_only_spectty_rows_via_fake` — inject then
   retract via `FakeConfigFile`; no Spectty rows remain; foreign keys untouched (indirectly asserted
   via the `FakeConfigFile`'s written content). `[REQ:hook-provisioning/ClaudeSettingsProvisioner
   → Scenario: retract removes only Spectty-managed hook entries]` `[unit]`
-- [ ] 5.5 RED: `claude_settings_provisioner_implements_provisioning_port_without_trait_change` —
+- [x] 5.5 RED: `claude_settings_provisioner_implements_provisioning_port_without_trait_change` —
   compile-time: `fn takes_port(_: &dyn ProvisioningPort) {}; takes_port(&provisioner)`.
   `[REQ:hook-provisioning/ClaudeSettingsProvisioner → Scenario: implements ProvisioningPort
   without trait change]` `[unit]` `[D21]`
-- [ ] 5.6 GREEN: create `crates/adapters/src/provision/settings_provisioner.rs` —
+- [x] 5.6 GREEN: create `crates/adapters/src/provision/settings_provisioner.rs` —
   `pub struct ClaudeSettingsProvisioner<F: ConfigFile> { files: F, home_claude_settings: String,
   hook_command: String, events: Vec<(String, HookCommandEntry)> }` impl `ProvisioningPort`:
   `inject` resolves path via `settings_path_for_scope`, read-or-default `{}`,
@@ -293,9 +293,9 @@ with WU-2 and WU-3.** **Blocks**: WU-9 (integration test spawns the built binary
   write (absent = `Ok(())`). `hook_command` is the resolved `spectty_hook_command()` path
   embedded in each `HookCommandEntry`. `[REQ:hook-provisioning/ClaudeSettingsProvisioner]`
   `[unit]` `[D21]`
-- [ ] 5.7 GREEN: export `ClaudeSettingsProvisioner` from `crates/adapters/src/provision/mod.rs` +
+- [x] 5.7 GREEN: export `ClaudeSettingsProvisioner` from `crates/adapters/src/provision/mod.rs` +
   adapters `lib.rs`. `[ci]`
-- [ ] **Gate (WU-5)**: `cargo test --workspace` green (5 provisioner tests + all prior); fmt clean;
+- [x] **Gate (WU-5)**: `cargo test --workspace` green (5 provisioner tests + all prior); fmt clean;
   clippy `-D warnings` clean; `cargo deny ... check bans` → `bans ok`.
 
 ---
@@ -314,33 +314,33 @@ absent file → None; older → None).
 > `poll` returns `Some(event)` ONLY when `state.ts > last_ts_or_zero`, then advances
 > `last_ts`. This is the central correctness seam — pinned by the consume-once tests.
 
-- [ ] 6.1 RED: `state_file_reader_first_poll_with_ts_1_returns_some` — injected read closure returns
+- [x] 6.1 RED: `state_file_reader_first_poll_with_ts_1_returns_some` — injected read closure returns
   `{"event":"Stop","ts":1,"session_id":"x"}`; last_ts = None → poll returns `Some(Stop)`, last_ts
   becomes `Some(1)`. `[REQ:pipeline-augmentation/run_signal_loop → Scenario: A new state file event
   triggers one Observed emission]` `[unit]` `[D22]`
-- [ ] 6.2 RED: `state_file_reader_same_ts_second_poll_returns_none` — poll twice with same content
+- [x] 6.2 RED: `state_file_reader_same_ts_second_poll_returns_none` — poll twice with same content
   (ts=1); second call → None. `[REQ:pipeline-augmentation/run_signal_loop → Scenario: Same ts is not
   re-emitted on a subsequent tick]` `[unit]` `[D22]`
-- [ ] 6.3 RED: `state_file_reader_newer_ts_fires_again` — after consuming ts=1, read returns ts=2 →
+- [x] 6.3 RED: `state_file_reader_newer_ts_fires_again` — after consuming ts=1, read returns ts=2 →
   Some(new event). `[REQ:pipeline-augmentation/run_signal_loop → Scenario: A newer ts supersedes
   without re-emitting the old one]` `[unit]` `[D22]`
-- [ ] 6.4 RED: `state_file_reader_absent_file_returns_none` — read closure returns `Ok(None)` →
+- [x] 6.4 RED: `state_file_reader_absent_file_returns_none` — read closure returns `Ok(None)` →
   poll returns None (normal — no hook fired yet). `[REQ:pipeline-augmentation/run_signal_loop
   → Scenario: An absent state file on a tick is silently ignored]` `[unit]`
-- [ ] 6.5 RED: `state_file_reader_older_ts_returns_none` — `last_ts = Some(7)`, read returns ts=6 →
+- [x] 6.5 RED: `state_file_reader_older_ts_returns_none` — `last_ts = Some(7)`, read returns ts=6 →
   None (stale, do not re-fire). `[unit]` `[D22]`
-- [ ] 6.6 RED: `state_file_reader_malformed_json_returns_none` — read returns bad JSON → None (not
+- [x] 6.6 RED: `state_file_reader_malformed_json_returns_none` — read returns bad JSON → None (not
   an error to the caller). `[REQ:pipeline-augmentation/run_signal_loop → Scenario: A malformed
   state file is silently ignored]` `[unit]`
-- [ ] 6.7 GREEN: create `crates/adapters/src/hook/reader.rs` —
+- [x] 6.7 GREEN: create `crates/adapters/src/hook/reader.rs` —
   `pub struct StateFileReader { path: String, last_ts: Option<u64> }`
   `impl StateFileReader { pub fn new(runtime_dir: &str, session_id: &str) -> Self;
     pub fn poll(&mut self, read: &dyn Fn(&str) -> std::io::Result<Option<String>>) -> Option<HookEvent>; }`
   Consume-once predicate: `ts > self.last_ts.unwrap_or(0)`. `[REQ:pipeline-augmentation/
   run_signal_loop]` `[unit]` `[D22]`
-- [ ] 6.8 GREEN: re-export `StateFileReader` from `crates/adapters/src/hook/mod.rs` + adapters
+- [x] 6.8 GREEN: re-export `StateFileReader` from `crates/adapters/src/hook/mod.rs` + adapters
   `lib.rs`. `[ci]`
-- [ ] **Gate (WU-6)**: `cargo test --workspace` green (6 new reader tests + all prior); fmt clean;
+- [x] **Gate (WU-6)**: `cargo test --workspace` green (6 new reader tests + all prior); fmt clean;
   clippy clean; `cargo deny ... check bans` → `bans ok`.
 
 ---

@@ -1,0 +1,19 @@
+[package]
+name = "spectty-hook"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The Spectty hook sidecar. It is a standalone binary Claude Code invokes as a
+# hook command on lifecycle events (Stop, UserPromptSubmit, etc.) — NOT part of
+# the Tauri/Core graph (D25). Mirrors spectty-mcp: serde/serde_json only, never
+# depends on spectty-core, never on tauri.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "spectty-hook"
+path = "src/main.rs"
