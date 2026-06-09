@@ -91,6 +91,9 @@ impl PtyAdapter {
         if let Some(cwd) = &cfg.cwd {
             command.cwd(cwd);
         }
+        for (k, v) in &cfg.env {
+            command.env(k, v);
+        }
 
         let child = pair
             .slave

@@ -67,7 +67,12 @@ pub fn transition(current: AgentStatus, observed: Observed) -> AgentStatus {
         (Starting, Working) => Running, // skipped Idle (immediate task)
         (Idle, Working) => Running,
         (Running, NeedsInput) => AwaitingInput,
-        (Running, Ready) => Running, // still running, quiescent burst
+        // M3 PRIMARY FIX (D24): a `Stop` hook fires `Ready` when the agent's turn ends
+        // cleanly; the AUTHORITATIVE hook path must transition Running → Idle so the
+        // bypass-permissions "stuck Running" bug is resolved. PTY scraping's "quiescent
+        // burst" Ready now shares this edge — if the PTY emits Ready, the agent has also
+        // reached a prompt (i.e., it IS idle). Both paths converge correctly.
+        (Running, Ready) => Idle,
         (AwaitingInput, Working) => Running,
         (AwaitingInput, Ready) => Running, // input consumed, output resumed
         // No legal change → no event. This covers every illegal jump, including
@@ -106,16 +111,27 @@ mod tests {
 
     #[test]
     fn transition_no_op_observation_leaves_current() {
-        // A quiescent `Ready` burst while already Running is a legal NO-OP: the design
-        // §3.4 table keeps `current` so the caller emits no `status_changed` event. This
-        // is the post-D8 form of "an observation that maps to no state change is ignored".
+        // A Working observation while already Running is a legal NO-OP (the agent is
+        // already in the state the observation maps to).
         assert_eq!(
             transition(AgentStatus::Running, Observed::Working),
             AgentStatus::Running
         );
+        // A Ready observation while already Idle is a legal NO-OP.
         assert_eq!(
             transition(AgentStatus::Idle, Observed::Ready),
             AgentStatus::Idle
+        );
+    }
+
+    // M3 PRIMARY FIX (D24): a Stop hook fires Ready when the agent's turn ends cleanly.
+    // `transition(Running, Ready)` MUST now reach Idle — the bypass-permissions fix.
+    #[test]
+    fn transition_running_ready_reaches_idle_m3_fix() {
+        assert_eq!(
+            transition(AgentStatus::Running, Observed::Ready),
+            AgentStatus::Idle,
+            "M3 PRIMARY FIX: Running + Ready MUST reach Idle (Stop hook drives turn end)"
         );
     }
 
@@ -249,8 +265,9 @@ mod tests {
             ((Idle, NeedsInput), Idle),
             ((Idle, Finished), Completed),
             ((Idle, Failed), Error),
-            // Running row. Spec: `Running → {AwaitingInput, Completed, Error}`.
-            ((Running, Ready), Running),
+            // Running row. M3 D24 PRIMARY FIX: Running+Ready → Idle (Stop hook).
+            // Spec row updated: Running → {Idle, AwaitingInput, Completed, Error}.
+            ((Running, Ready), Idle),
             ((Running, Working), Running),
             ((Running, NeedsInput), AwaitingInput),
             ((Running, Finished), Completed),

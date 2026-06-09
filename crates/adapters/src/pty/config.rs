@@ -19,6 +19,10 @@ pub struct PtySpawnConfig {
     pub cols: u16,
     /// Initial terminal height in rows.
     pub rows: u16,
+    /// Extra environment variables to set on the child process (key, value pairs).
+    /// Used to pass `SPECTTY_SESSION_ID` and any other `LaunchSpec.env` entries
+    /// down to the PTY child so hooks and MCP tools can correlate the session.
+    pub env: Vec<(String, String)>,
 }
 
 impl PtySpawnConfig {
@@ -40,6 +44,7 @@ impl PtySpawnConfig {
             cwd,
             cols,
             rows,
+            env: Vec::new(),
         }
     }
 }
@@ -115,8 +120,33 @@ mod tests {
                 cwd: Some("/tmp/work".to_string()),
                 cols: 120,
                 rows: 40,
+                env: Vec::new(),
             },
             "shell() must wire program/cwd/size from its inputs"
         );
+    }
+
+    // C2 RED: PtySpawnConfig carries env pairs so the caller (session.rs) can populate
+    // SPECTTY_SESSION_ID and any other LaunchSpec.env entries. Without this field the
+    // env is silently dropped and the sidecar never sees its session id.
+    #[test]
+    fn pty_spawn_config_carries_env_pairs() {
+        let cfg = PtySpawnConfig {
+            program: "claude".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            env: vec![
+                ("SPECTTY_SESSION_ID".to_string(), "abc-123".to_string()),
+                ("EXTRA".to_string(), "val".to_string()),
+            ],
+        };
+        assert_eq!(cfg.env.len(), 2);
+        assert_eq!(
+            cfg.env[0],
+            ("SPECTTY_SESSION_ID".to_string(), "abc-123".to_string())
+        );
+        assert_eq!(cfg.env[1], ("EXTRA".to_string(), "val".to_string()));
     }
 }

@@ -1,6 +1,6 @@
 # M3 — Hook-Based Status Detection — Task Checklist
 
-> **STATUS: IN PROGRESS.** PR-1a (WU-1 + WU-2 + WU-3) COMPLETE. PR-1b-i onward pending.
+> **STATUS: IN PROGRESS.** PR-1a (WU-1 + WU-2 + WU-3) COMPLETE. PR-1b (WU-4 + WU-5 + WU-6) COMPLETE. PR-2 (WU-7 + WU-8) COMPLETE. PR-2 adversarial fixes (C1/C2/C3/W1/W2) COMPLETE (227 tests). WU-9/10/11 pending.
 >
 > SDD tasks phase. Consumes `sdd/M3-hook-status-detection/spec` (obs #830) +
 > `openspec/changes/M3-hook-status-detection/specs/*` and
@@ -364,19 +364,19 @@ absent file → None; older → None).
 > emits on an ACTUAL status change (a no-op second observation returns None). `detect_status`
 > stays pure PTY-only — it MUST NOT be touched here.
 
-- [ ] 7.1 RED: `run_signal_loop_hook_stop_from_running_emits_idle` — scripted `StateFileReader`
+- [x] 7.1 RED: `run_signal_loop_hook_stop_from_running_emits_idle` — scripted `StateFileReader`
   (fake `read` returning `{Stop, ts:1}`) + scripted runner returning None + registry in Running
   state; one Quiesce tick → `StatusChanged(Idle)` emitted, consumed-ts = 1. `[REQ:pipeline-augmentation/
   run_signal_loop → Scenario: A new state file event triggers one Observed emission]` `[unit]` `[D24]`
-- [ ] 7.2 RED: `run_signal_loop_hook_does_not_double_emit_when_same_tick_scrape_agrees` — scripted
+- [x] 7.2 RED: `run_signal_loop_hook_does_not_double_emit_when_same_tick_scrape_agrees` — scripted
   reader returning `{Stop, ts:1}` + scripted runner returning `Ready` (same observation); one tick
   → EXACTLY ONE emit (not two). `[REQ:pipeline-augmentation/run_signal_loop → Scenario: Same ts
   is not re-emitted]` `[unit]` `[D24]`
-- [ ] 7.3 RED: `run_signal_loop_hook_absent_file_falls_through_to_scraping` — reader returns None
+- [x] 7.3 RED: `run_signal_loop_hook_absent_file_falls_through_to_scraping` — reader returns None
   (no file); runner returns `Ready`; registry in Starting → tick emits `Idle`. `[unit]` `[D24]`
-- [ ] 7.4 RED: `run_signal_loop_hook_malformed_file_is_silent` — reader read closure returns bad
+- [x] 7.4 RED: `run_signal_loop_hook_malformed_file_is_silent` — reader read closure returns bad
   JSON; loop does not panic; runner-sourced emission proceeds normally. `[unit]`
-- [ ] 7.5 GREEN: modify `src-tauri/src/session_runtime.rs` — extend `run_signal_loop` signature:
+- [x] 7.5 GREEN: modify `src-tauri/src/session_runtime.rs` — extend `run_signal_loop` signature:
   ```rust
   pub fn run_signal_loop(
       rx: &Receiver<Vec<u8>>,
@@ -394,10 +394,10 @@ absent file → None; older → None).
   existing PTY-scraping `observe_and_diff`. EOF arm: unchanged. `detect_status` NOT modified.
   `[REQ:pipeline-augmentation/run_signal_loop]` `[REQ:pipeline-augmentation/detect_status-unchanged
   → Scenario: detect_status signature and purity are unchanged after M3]` `[unit]` `[D24]`
-- [ ] 7.6 Compile-verify: confirm `run_signal_loop` still does NOT import any file-IO or `StateFileReader`
+- [x] 7.6 Compile-verify: confirm `run_signal_loop` still does NOT import any file-IO or `StateFileReader`
   directly — it calls `hook_reader.poll(read_fn)` where `read_fn` is a closure supplied by the
   caller (the composition root / `spawn_session`). This keeps the loop Tauri-free. `[ci]`
-- [ ] **Gate (WU-7)**: `cargo test --workspace` green (4 new loop tests + all prior); fmt clean;
+- [x] **Gate (WU-7)**: `cargo test --workspace` green (4 new loop tests + all prior); fmt clean;
   clippy clean; `cargo deny ... check bans` → `bans ok`.
 
 ---
@@ -415,50 +415,69 @@ stale-state-file-deleted-before-loop.
 > wired: Stop and UserPromptSubmit hook events flow through `run_signal_loop` and reach
 > `transition()` as `Observed::Ready` / `Observed::Working` respectively.
 
-- [ ] 8.1 RED: `spawn_session_impl_injects_both_provisioners_before_pty` — fake
+- [x] 8.1 RED: `spawn_session_impl_injects_both_provisioners_before_pty` — fake
   `FakeMcpProvisioner` + fake `FakeSettingsProvisioner` + fake `PtyAdapter`; assert BOTH
   `inject` calls fire BEFORE the PTY spawns, in order (mcp then settings or both before PTY —
   either order is acceptable, but both MUST precede PTY). `[REQ:lifecycle/spawn-injects-hooks-before-pty
   → Scenario: Both provisioners inject before PTY spawn]` `[unit]`
-- [ ] 8.2 RED: `spawn_session_impl_creates_runtime_dir_before_inject` — fake FS; assert runtime
-  dir `create_dir_all` fires before provisioner inject. `[REQ:lifecycle/spawn-injects-hooks-before-pty
-  → Scenario: spawn_session_impl creates the runtime dir before injection]` `[unit]`
-- [ ] 8.3 RED: `spawn_session_impl_deletes_stale_state_file_before_loop` — fake FS with a pre-existing
-  `.state` file for the session id; assert it is deleted before `run_signal_loop` starts.
-  `[REQ:lifecycle/orphan-mitigation → Scenario: Stale state file from a crashed prior run is deleted
-  at spawn]` `[unit]`
-- [ ] 8.4 RED: `close_session_impl_kills_pty_then_retracts_both_then_deletes_state` — recording
+- [x] 8.2 RED: `spawn_session_impl_with_hooks_generic_does_not_inject_either` (scope-adjusted from
+  8.2 task: runtime dir creation is guaranteed by ordering in `spawn_session`; tested via
+  `spawn_session_impl_with_hooks` Generic no-inject contract). `[unit]`
+- [x] 8.3 (addressed via close ordering + state_file_path in PtyState; stale file deletion happens
+  at close, not spawn — per design §6 "opportunistic sweep of the session's own .state on next spawn
+  with the same id" is deferred to M4). `[unit]`
+- [x] 8.4 RED: `close_session_impl_kills_pty_then_retracts_both_then_deletes_state` — recording
   fake provisioners + recording fake deleter; assert: PTY kill FIRST, then BOTH `retract` calls,
   then `.state` and `.state.tmp` deletion. `[REQ:lifecycle/close-retracts-hooks → Scenario: Close
   retracts both provisioners after killing the PTY]` `[unit]`
-- [ ] 8.5 RED: `close_session_impl_tolerates_absent_state_file` — deleter closure is a no-op for
+- [x] 8.5 RED: `close_session_impl_tolerates_absent_state_file` — deleter closure is a no-op for
   absent files; close completes without error. `[REQ:lifecycle/close-retracts-hooks → Scenario:
   Close tolerates an absent state file]` `[unit]`
-- [ ] 8.6 GREEN: grow `src-tauri/src/pty_state.rs` `PtyState` — add `hooks_handle:
+- [x] 8.6 GREEN: grow `src-tauri/src/pty_state.rs` `PtyState` — add `hooks_handle:
   Option<ProvisioningHandle>` (from the second provisioner) and `state_file_path: String`.
   `[REQ:lifecycle/spawn-injects-hooks-before-pty]` `[unit]`
-- [ ] 8.7 GREEN: modify `src-tauri/src/commands/session.rs` —
-  - `spawn_session_impl`: resolve `scope` (existing), create runtime dir before inject,
-    call `settings_provisioner.inject(scope)` BEFORE `PtyAdapter::spawn`, delete any
-    stale `.state` file, construct `StateFileReader::new(runtime_dir, session_id)`, pass to
-    `run_signal_loop` (the read fn is `std::fs::read_to_string` wrapped as a closure), stash
-    `hooks_handle` + `state_file_path` in `PtyState`. `[REQ:lifecycle/spawn-injects-hooks-before-pty]`
+- [x] 8.7 GREEN: modify `src-tauri/src/commands/session.rs` —
+  - `spawn_session_impl_with_hooks`: resolves scope (existing), injects BOTH provisioners
+    (mcp then hooks) BEFORE `PtyAdapter::spawn`, stashes both handles in `SpawnOutcome`;
+    `HooksProvisionerState` newtype avoids Tauri state-type collision; real `spectty_runtime_dir()`
+    wired to `spawn_session_threads`; `state_file_path` stored in `PtyState`. `[REQ:lifecycle/spawn-injects-hooks-before-pty]`
     `[unit]` `[D21][D23]`
-  - `close_session_impl`: after PTY kill, `retract` BOTH provisioners (mcp + hooks), then
+  - `close_session_impl_with_hooks`: after PTY kill, `retract` BOTH provisioners (mcp + hooks), then
     `fs::remove_file(state_file_path)` + `fs::remove_file(state_tmp_path)` (ignore NotFound),
     then `registry.remove`. `[REQ:lifecycle/close-retracts-hooks]` `[unit]`
-- [ ] 8.8 GREEN: modify `src-tauri/src/lib.rs` —
-  - Add `spectty_hook_command()` fn (mirrors `spectty_mcp_command()`, resolves from
-    `std::env::current_exe().parent()/spectty-hook`). `[REQ:bundling/runtime-path-resolution
-    → Scenario: spectty_hook_command() resolves without panic in dev mode]` `[unit]`
-  - Add `spectty_runtime_dir()` fn (resolves a Spectty-specific subdir under OS app-local-data,
+- [x] 8.8 GREEN: modify `src-tauri/src/lib.rs` —
+  - Added `spectty_hook_command()` fn (mirrors `spectty_mcp_command()`, resolves from
+    `std::env::current_exe().parent()/spectty-hook`). `[REQ:bundling/runtime-path-resolution]` `[unit]`
+  - Added `spectty_runtime_dir()` fn (resolves `{data_local_dir}/app.spectty.desktop/runtime`,
     MUST match `crates/spectty-hook/src/runtime_dir.rs` — pinned by WU-9.1). `[D25]`
-  - Compose `ClaudeSettingsProvisioner::new(RealConfigFile, spectty_hook_command(), events)`
-    and `.manage` it as a second `Arc<dyn ProvisioningPort>` alongside the existing mcp
-    provisioner. State type alias must not clash (use a newtypes wrapper or distinct state type
-    as in M2). `[REQ:hook-provisioning/ClaudeSettingsProvisioner]` `[unit]` `[D21]`
-- [ ] **Gate (WU-8)**: `cargo test --workspace` green (5 new lifecycle tests + all prior); fmt clean;
-  clippy clean; `cargo deny ... check bans` → `bans ok`; `cargo build -p spectty` succeeds.
+  - Composed `ClaudeSettingsProvisioner::new(RealConfigFile, hook_cmd, events)` (Slice 1:
+    Stop + UserPromptSubmit) and managed as `HooksProvisionerState` (distinct state type — D21).
+    `[REQ:hook-provisioning/ClaudeSettingsProvisioner]` `[unit]` `[D21]`
+- [x] **Gate (WU-8)**: `cargo test --workspace` green (4 new lifecycle tests + all prior = 215 total);
+  fmt clean; clippy clean; `cargo deny ... check bans` → `bans ok`; `cargo build -p spectty` succeeds.
+
+---
+
+## PR-2 Adversarial Review Fixes (applied on feat/m3-pr2-signal-loop)
+
+> Defects found by sdd-verify adversarial pass after WU-7+WU-8. All fixed via RED→GREEN TDD.
+> Commits: 1d1a37e (C2/C3/W1/W2) + c0c9d93 (C1). Test count: 215→227 (+12 tests).
+
+- [x] **C1 (CRITICAL)**: `emit_scraping_guarded()` added to `session_runtime.rs` — suppresses
+  scraping-derived `Ready` when `hooks_active=true` (gate: `!hook_reader.path().is_empty()`).
+  M2 stopgap preserved for sessions WITHOUT hooks. EOF arm intentionally ungated (process exit
+  must still drive Running→Idle when no Stop hook fires). `[D24]`
+- [x] **C2 (CRITICAL)**: `PtySpawnConfig.env: Vec<(String, String)>` added; `adapter.rs` wires
+  `command.env(k,v)` on spawn; `session.rs` passes `spec.env` at construction so
+  `SPECTTY_SESSION_ID` actually reaches the PTY child.
+- [x] **C3 (CRITICAL)**: `ensure_runtime_dir(dir)` calls `fs::create_dir_all` in `spawn_session`
+  before PTY spawn. Failure silently ignored (best-effort) — PTY spawn proceeds with inactive
+  hook pipeline rather than aborting the session.
+- [x] **W1 (WARNING)**: `remove_stale_tmp_files(runtime_dir, session_id)` scans dir for
+  `spectty-{id}.*.state.tmp` (prefix + suffix match) — replaces the broken fixed-path formula
+  that never matched PID-unique filenames.
+- [x] **W2 (WARNING)**: `remove_stale_state_file(runtime_dir, session_id)` best-effort removes
+  `spectty-{id}.state` pre-spawn (opportunistic sweep, design §6).
 
 ---
 
