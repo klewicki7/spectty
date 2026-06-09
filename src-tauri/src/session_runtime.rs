@@ -11,10 +11,13 @@
 //! ```
 //!
 //! The render `tx` keeps its M1 UNBOUNDED behavior so rendering is never starved.
-//! The signal `tx` is a BOUNDED [`sync_channel`] (drop-oldest, [`signal_try_send`])
-//! so a slow signal thread can NEVER back-pressure the read thread and therefore can
-//! never back-pressure the renderer (R6/D9). Status detection only needs the LATEST
-//! window, so dropping an older slice is harmless.
+//! The signal `tx` is a BOUNDED [`sync_channel`] (drop-on-full / drop-NEWEST,
+//! [`signal_try_send`]) so a slow signal thread can NEVER back-pressure the read
+//! thread and therefore can never back-pressure the renderer (R6/D9). Status
+//! detection only needs the LATEST window folded into the rolling buffer, so when
+//! the buffer is full we discard the NEWEST slice while the already-buffered slices
+//! survive — acceptable because every slice folds into the same rolling window and
+//! the dropped bytes were the least-settled ones.
 //!
 //! ## What lives here in PR5a
 //!
@@ -44,8 +47,8 @@ use spectty_core::{
 };
 
 /// Bound on the signal tee channel. Status detection only needs the LATEST window,
-/// so a small buffer is enough; on overflow the read thread DROPS the slice rather
-/// than block (D9). 64 mirrors the design's suggested capacity.
+/// so a small buffer is enough; on overflow the read thread DROPS the NEWEST slice
+/// rather than block (D9). 64 mirrors the design's suggested capacity.
 pub const SIGNAL_CHANNEL_CAP: usize = 64;
 
 /// Quiescent tick interval. When the PTY is silent, the signal thread still wakes
@@ -111,15 +114,20 @@ pub fn signal_channel(cap: usize) -> (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) {
 /// This is the R6 render-protection seam: a [`SyncSender::send`] would BLOCK the
 /// read thread once the buffer fills, which would in turn stall the renderer tee.
 /// Instead we [`try_send`](SyncSender::try_send) and DROP the slice when the buffer
-/// is full — status detection only needs the most recent window, so an older slice
-/// is expendable. Returns `true` if the slice was queued, `false` if it was dropped
-/// (full buffer) or the signal thread is gone (disconnected). The read thread
-/// ignores the result either way — it must NEVER act on signal back-pressure.
+/// is full. NOTE on drop semantics: a [`sync_channel`] + `try_send` drops the
+/// NEWEST slice on overflow (the already-buffered slices survive in FIFO order),
+/// NOT the oldest. That is acceptable here because every slice is folded into the
+/// same rolling window by the signal thread, so the buffered (older) slices still
+/// reach the window and only the least-settled newest bytes are discarded. Returns
+/// `true` if the slice was queued, `false` if it was dropped (full buffer) or the
+/// signal thread is gone (disconnected). The read thread ignores the result either
+/// way — it must NEVER act on signal back-pressure.
 pub fn signal_try_send(tx: &SyncSender<Vec<u8>>, slice: Vec<u8>) -> bool {
     match tx.try_send(slice) {
         Ok(()) => true,
-        // Full buffer (drop-oldest: we simply discard the NEW slice) or the signal
-        // thread has exited. Either way the read thread does not block.
+        // Full buffer (drop-on-full: we discard the NEWEST slice; buffered ones
+        // survive) or the signal thread has exited. Either way the read thread does
+        // not block.
         Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
     }
 }
@@ -378,9 +386,11 @@ mod tests {
     }
 
     // WU-9.4 RED → 9.5 GREEN: the bounded signal channel drops on overflow and the
-    // try_send side NEVER blocks the read thread.
+    // try_send side NEVER blocks the read thread. NOTE: `sync_channel` + `try_send`
+    // drops the NEWEST slice on a full buffer (the buffered ones survive), which is
+    // what this test pins — see `signal_try_send`'s drop-semantics rustdoc.
     #[test]
-    fn bounded_signal_channel_drops_oldest_never_blocks() {
+    fn bounded_signal_channel_drops_on_full_never_blocks() {
         let cap = 2;
         let (tx, rx) = signal_channel(cap);
 
