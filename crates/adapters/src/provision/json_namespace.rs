@@ -771,10 +771,16 @@ mod tests {
 
     // ── WU-10.2 RED: Notification entry uses PERMISSION_PROMPT_MATCHER ────────
     //
-    // Calls inject_spectty_hooks with all 5 events (Slice 1 + Slice 2), inspects
-    // the Notification entry in the output, and asserts its matcher field equals
-    // the PERMISSION_PROMPT_MATCHER constant. Written RED-first: the constant does
-    // not exist yet; this causes a compile error.
+    // Calls inject_spectty_hooks with the production 4-event shape (Slice 1 +
+    // Slice 2 minus SubagentStop/StopFailure, which was deferred in PR-4 — see
+    // lib.rs `production_hook_events` doc), inspects the Notification entry in the
+    // output, and asserts its matcher field equals the PERMISSION_PROMPT_MATCHER
+    // constant.
+    //
+    // S1 FIX (PR-4): the original test used a 5-event list with two "Stop" rows
+    // (Stop + StopFailure under "Stop") which was never a valid production shape.
+    // Updated to mirror the actual production list: UserPromptSubmit, Stop,
+    // Notification+matcher, SessionEnd.
     //
     // [REQ:hook-status-mapping/hook-event-shape → Scenario: Notification event has
     // a permission-prompt matcher]
@@ -783,7 +789,8 @@ mod tests {
         use crate::hook::state::PERMISSION_PROMPT_MATCHER;
 
         let hook_cmd = "/usr/local/bin/spectty-hook".to_string();
-        let all_five_events = vec![
+        // Production 4-event shape (matches lib.rs `production_hook_events`).
+        let production_events = vec![
             (
                 "UserPromptSubmit".to_string(),
                 HookCommandEntry {
@@ -816,17 +823,10 @@ mod tests {
                 },
                 None,
             ),
-            (
-                "Stop".to_string(), // StopFailure reuses Stop event name — see design §3.4
-                HookCommandEntry {
-                    command: hook_cmd.clone(),
-                    args: vec!["--event".to_string(), "StopFailure".to_string()],
-                },
-                None,
-            ),
+            // SubagentStop/StopFailure intentionally absent — deferred in PR-4.
         ];
 
-        let injected = inject_spectty_hooks("{}", &all_five_events).expect("inject ok");
+        let injected = inject_spectty_hooks("{}", &production_events).expect("inject ok");
         let parsed: serde_json::Value = serde_json::from_str(&injected).expect("valid JSON");
 
         // The Notification entry MUST have a matcher field.

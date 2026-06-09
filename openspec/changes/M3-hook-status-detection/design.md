@@ -163,6 +163,18 @@ impl StateFileReader {
 
 > `transition()` and the `Observed` enum are UNCHANGED — hooks reuse the exact M2 authority (D24).
 
+> **DEVIATION (PR-4)**: `SubagentStop` carries no reliable failure signal. Per the official
+> Claude Code hook docs, `SubagentStop` fires whenever **any** subagent finishes — success OR
+> failure. Its payload has no failure discriminator, and the sidecar drains-and-ignores stdin
+> by design (D23). Wiring `SubagentStop → StopFailure → Failed → Error` would flip healthy
+> sessions to `Error` on every tool-call subagent completion. Therefore the `SubagentStop`
+> hook entry is **not** registered in the production event list in Slice 2. `StopFailure` has
+> no hook source in Slice 2; it is deferred until Claude Code exposes a failure-discriminating
+> event (e.g. a dedicated `SubagentError` hook or a payload field). `Error` remains reachable
+> via non-hook paths. `HookEvent::StopFailure`, its `event_to_observed` mapping, and the
+> sidecar's `--event StopFailure` acceptance are kept as-is (already on main since PR-1b;
+> harmless and forward-compatible).
+
 ### 3.5 Injected hooks JSON (the exact shape `inject_spectty_hooks` produces — Slice 1)
 ```json
 {

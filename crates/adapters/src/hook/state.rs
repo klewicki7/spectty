@@ -208,38 +208,6 @@ mod tests {
         assert_eq!(event_to_observed(HookEvent::StopFailure), Observed::Failed);
     }
 
-    // ── WU-10.1 RED: 3 Slice 2 mapping assertions ─────────────────────────────
-    // These tests assert the Permission→NeedsInput, SessionEnd→Finished, and
-    // StopFailure→Failed mappings that activate Slice 2 semantics (D24).
-    // Written as part of WU-10 per the Strict TDD protocol (RED before GREEN).
-
-    #[test]
-    fn event_to_observed_permission_maps_to_needs_input_slice2() {
-        assert_eq!(
-            event_to_observed(HookEvent::Permission),
-            Observed::NeedsInput,
-            "Permission must map to NeedsInput (Running → AwaitingInput, Slice 2)"
-        );
-    }
-
-    #[test]
-    fn event_to_observed_session_end_maps_to_finished_slice2() {
-        assert_eq!(
-            event_to_observed(HookEvent::SessionEnd),
-            Observed::Finished,
-            "SessionEnd must map to Finished (* → Completed, Slice 2)"
-        );
-    }
-
-    #[test]
-    fn event_to_observed_stop_failure_maps_to_failed_slice2() {
-        assert_eq!(
-            event_to_observed(HookEvent::StopFailure),
-            Observed::Failed,
-            "StopFailure must map to Failed (* → Error, Slice 2)"
-        );
-    }
-
     /// Full 5-row table test: every event maps to its design-specified Observed
     /// variant. This is the DATA-completeness pin — adding a new event without
     /// updating this table will cause it to fail.
