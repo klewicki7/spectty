@@ -1,5 +1,11 @@
 # M2 — Spawn Agent + Provisioner — Task Checklist
 
+> **STATUS: M2 IMPLEMENTATION COMPLETE (2026-06-08).** All 12 work units / 10 PRs
+> applied. PR1a–PR6 merged (PR#7–#15); PR7 (WU-12 acceptance + ADR-0004 amendment)
+> committed on `docs/m2-pr7-acceptance-adr` (`14ee145`). Exit criteria 12.1–12.5
+> are `[manual]` (run by hand against a live Claude Code install); their automated
+> floor runs green in CI. Ready for `sdd-verify` → `sdd-archive`.
+
 > SDD tasks phase. Consumes `sdd/M2-spawn-agent-provisioner/spec` (obs #801) +
 > `openspec/changes/M2-spawn-agent-provisioner/specs/*` and
 > `sdd/M2-spawn-agent-provisioner/design` (obs #802) +
@@ -283,9 +289,9 @@ WU-8 (spectty-mcp stub, independent) ──────────────�
 - [ ] 12.4 Close the session → PTY terminates AND the managed `spectty_*` section is removed (foreign entries intact). `[REQ:roadmap-exit/criterion-4]` `[REQ:provisioning-port/inject-on-create-retract-on-close]` `[manual]`
 - [ ] 12.5 Spawn `bash` via Generic → reaches `Idle` → after the configurable inactivity window → `Completed`. `[REQ:roadmap-exit/criterion-5]` `[REQ:agent-runner/generic-idle-timeout]` `[manual]`
 - [ ] 12.6 (best-effort, ungated) Windows agent-spawn smoke if a Windows host is available — failure does NOT block M2. `[REQ:cross-platform/macos-gating-windows-best-effort]` `[manual]`
-- [ ] 12.7 DOC: append a short "Superseded for M2+" note to ADR-0004 and `agent-abstraction.md` pointing at the separate `ProvisioningPort` (D7 — the ADR's agent-agnostic intent is preserved; only the mechanism moved from an `AgentRunner::provisioner()` method to a sibling Core port). The CODE is the source of truth. `[REQ:agent-runner/core-port-m2-subset]` `[D7]`
-- [ ] 12.8 VERIFY-FLAG: confirm the R8 deferral (no boot-time orphan sweep; `.spectty.bak` + idempotent retract as the escape hatch) is recorded as a conscious, documented deferral for `sdd-verify` and carried to M3. `[REQ:provisioning-port/atomic-write-backup]` `[D14]`
-- [ ] **Gate (WU-12)**: all macOS criteria (12.1–12.5) pass → M2 acceptance PASS; record results for `sdd-verify`. Windows (12.6) informational only.
+- [x] 12.7 DOC: append a short "Superseded for M2+" note to ADR-0004 and `agent-abstraction.md` pointing at the separate `ProvisioningPort` (D7 — the ADR's agent-agnostic intent is preserved; only the mechanism moved from an `AgentRunner::provisioner()` method to a sibling Core port). The CODE is the source of truth. `[REQ:agent-runner/core-port-m2-subset]` `[D7]` — _PR7: ADR-0004 "Amendment — Superseded for M2+" section + matching note in `docs/architecture/agent-abstraction.md` under the trait sketch. Both point at `crates/core/src/ports/provisioning.rs`; clarified the shipped trait has 5 methods and no `provisioner()`._
+- [x] 12.8 VERIFY-FLAG: confirm the R8 deferral (no boot-time orphan sweep; `.spectty.bak` + idempotent retract as the escape hatch) is recorded as a conscious, documented deferral for `sdd-verify` and carried to M3. `[REQ:provisioning-port/atomic-write-backup]` `[D14]` — _PR7: recorded as **L5** in `acceptance.md` "Known limitations" + flagged for verify and M3._
+- [ ] **Gate (WU-12)**: all macOS criteria (12.1–12.5) pass → M2 acceptance PASS; record results for `sdd-verify`. Windows (12.6) informational only. — _PR7: acceptance.md authored with steps + automated-floor per criterion. **12.1–12.5 remain `[manual]`/unchecked** — they require a live Claude Code install + real PTY session and are run by hand; the automated floor (real-PTY Generic test, spectty-mcp stdio handshake, provisioner inject/retract round-trips) runs green in CI as the regression guard._
 
 ---
 

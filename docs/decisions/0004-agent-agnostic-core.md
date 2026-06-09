@@ -122,3 +122,34 @@ matching a known prompt string is easy, but detecting "`AwaitingInput` because t
 went idle after outputting a question" requires stateful logic. A pure config file cannot
 express stateful behavior. We retain the trait as the foundation and add a declarative
 layer on top in Phase 2 for the 80% of cases that are regex-matchable.
+
+## Amendment — Superseded for M2+ (provisioning is a sibling Core port, not a runner method)
+
+- Date: 2026-06-08
+- Driver: change `M2-spawn-agent-provisioner` (design ADR **D7 / risk R9**)
+
+The original sketch of the `AgentRunner` contract (see
+[Agent Abstraction](../architecture/agent-abstraction.md)) carried a provisioning
+method on the runner trait — `fn provisioner(&self) -> Option<Box<dyn Provisioner>>`.
+**M2 supersedes that mechanism.** Provisioning now lives behind a **separate Core port,
+`ProvisioningPort`** (`crates/core/src/ports/provisioning.rs`), NOT on `AgentRunner`.
+
+Rationale:
+
+- **Provisioning is a session-lifecycle concern, not a per-output-tick concern.** Inject
+  happens once on session create, retract once on session close — it does not belong next
+  to `detect_status`/`parse_cost`, which run per `OutputSignal`. Keeping it off the runner
+  trait keeps `AgentRunner` cohesive (launch + observe + describe).
+- **Generic agents skip it cleanly without a trait method.** `AgentDescriptor` carries
+  `requires_provisioning: bool`; the composition root decides whether to inject. A Generic
+  agent simply has `requires_provisioning == false`, so no `Option`/`None` ceremony leaks
+  into the runner contract.
+- **The agent-agnostic intent of this ADR is preserved.** The Core still contains zero
+  agent names and zero `if agent == "..."` branches. Only the MECHANISM moved: from a
+  method on `AgentRunner` to a sibling port. The actual `AgentRunner` trait shipped in M2
+  has five methods (`launch_spec`, `detect_status`, `parse_cost`, `quick_actions`,
+  `descriptor`) and **no `provisioner()`**.
+
+**The code is the source of truth** — `crates/core/src/ports/agent_runner.rs` and
+`crates/core/src/ports/provisioning.rs`. The `provisioner()` shape shown in
+`agent-abstraction.md` is historical; that doc carries the same amendment note.
