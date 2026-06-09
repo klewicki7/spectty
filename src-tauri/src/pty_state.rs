@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use spectty_adapters::PtyTransport;
+use spectty_core::ProvisioningHandle;
 
 /// Identifier for a live PTY. A plain `String` in M1 (a monotonic counter
 /// rendered as text); M2 can swap the minting strategy without touching callers.
@@ -34,6 +35,10 @@ pub struct PtyState {
     pub stop: Arc<AtomicBool>,
     /// Handle to the dedicated read thread, taken and joined on shutdown.
     pub reader_thread: Option<JoinHandle<()>>,
+    /// The provisioning handle injected at spawn for a cooperative agent (M2), so
+    /// `close_session` can retract the EXACT scope that was injected. `None` for raw
+    /// `pty_spawn` PTYs and for Generic agents (which require no provisioning).
+    pub provisioning: Option<ProvisioningHandle>,
 }
 
 impl PtyState {
