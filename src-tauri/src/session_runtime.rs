@@ -185,6 +185,21 @@ fn signal_step(outcome: Result<Vec<u8>, RecvTimeoutError>) -> SignalAction {
 /// closure that returns `Ok(Some(contents))` / `Ok(None)` / `Err(_)`.  This keeps
 /// the loop Tauri-free: `run_signal_loop` never performs I/O directly.
 ///
+/// ## Hook-gate: suppress scraping-derived Ready on Running (C1 fix, D24 option b)
+///
+/// When `hook_reader.path()` is non-empty (hooks are provisioned for this session),
+/// scraping-derived `Observed::Ready` is suppressed from the `Running` state on the
+/// Ingest and Quiesce arms. Only a hook `Stop` event may drive `Running → Idle` in
+/// that mode (D24 primary fix). This prevents a brief 200ms output pause from
+/// spuriously flipping a working agent to Idle before the Stop hook fires.
+///
+/// Sessions without hooks (`hook_reader.path()` is empty, i.e. Generic agents or
+/// sessions spawned without hook provisioning) keep the M2 stopgap behavior where
+/// quiescence drives `Running → Idle` via scraping.
+///
+/// The EOF arm always applies the quiescent snapshot WITHOUT the gate so a session
+/// that exits while Running can still reach Idle → Completed via the normal EOF path.
+///
 /// ## Fast-exit ordering (carry-forward from the PR2a fresh review)
 ///
 /// The transition table FORBIDS `Starting -> Completed`: a process that exits while
@@ -215,6 +230,12 @@ pub fn run_signal_loop(
     // Last instant a byte was seen, so quiescent ticks can compute a real `idle_ms`.
     let mut last_byte_at = clock.now();
 
+    // C1 FIX (D24 option b): when hooks are provisioned for this session (non-empty
+    // path), suppress scraping-derived Ready from the Running state on Ingest/Quiesce
+    // arms so only a hook Stop event can drive Running→Idle. Sessions without hooks
+    // (empty path) keep M2 stopgap behavior where quiescence drives Running→Idle.
+    let hooks_active = !hook_reader.path().is_empty();
+
     // The read closure for the hook reader: wraps `std::fs::read_to_string` into
     // the `Fn(&str) -> io::Result<Option<String>>` seam. Absent files → `Ok(None)`.
     let read_state = |path: &str| -> std::io::Result<Option<String>> {
@@ -235,7 +256,8 @@ pub fn run_signal_loop(
                 producer.ingest(&slice);
                 last_byte_at = clock.now();
                 let signal = producer.snapshot(last_byte_at, 0, true);
-                emit_on_change(runner, sessions, id, &signal, &mut emit);
+                // C1 FIX: when hooks active, gate out scraping Ready from Running.
+                emit_scraping_guarded(runner, sessions, id, &signal, hooks_active, &mut emit);
             }
             SignalAction::Quiesce => {
                 // Hook FIRST (D24): poll the state file before the quiescent snapshot.
@@ -244,12 +266,17 @@ pub fn run_signal_loop(
                 let now = clock.now();
                 let idle_ms = last_byte_at.elapsed_ms_until(now);
                 let signal = producer.snapshot(last_byte_at, idle_ms, false);
-                emit_on_change(runner, sessions, id, &signal, &mut emit);
+                // C1 FIX: when hooks active, gate out scraping Ready from Running.
+                emit_scraping_guarded(runner, sessions, id, &signal, hooks_active, &mut emit);
             }
             SignalAction::Eof => {
                 // FAST-EXIT ORDERING (see the rustdoc above): a quiescent snapshot
                 // FIRST so a `Starting` session can reach `Idle`/`Running` before the
-                // terminal observation (the table forbids `Starting -> Completed`)...
+                // terminal observation (the table forbids `Starting -> Completed`).
+                // NOTE: the EOF quiescent snapshot is NOT hook-gated — on process exit
+                // Running→Idle via the quiescent path is correct (the session is ending,
+                // no hook Stop will fire). This preserves the Starting→Idle→Completed
+                // fast-exit path for Cooperative agents too.
                 let now = clock.now();
                 let idle_ms = last_byte_at.elapsed_ms_until(now);
                 let quiescent = producer.snapshot(last_byte_at, idle_ms, false);
@@ -300,6 +327,67 @@ fn emit_on_change(
     emit: &mut impl FnMut(StatusChanged),
 ) {
     if let Some(status) = observe_and_diff(runner, sessions, id, signal) {
+        emit(StatusChanged {
+            session_id: id.clone(),
+            status,
+            quick_actions: runner.quick_actions(&status),
+        });
+    }
+}
+
+/// C1 FIX (D24 option b): scraping path with hook-gate for the Ingest/Quiesce arms.
+///
+/// When `hooks_active` is true (the session has hooks provisioned), this function
+/// suppresses scraping-derived `Observed::Ready` from the `Running` state so that
+/// only a hook `Stop` event may drive `Running → Idle`. All other observations
+/// (Working, NeedsInput, Finished, Failed, and Ready from non-Running states) are
+/// applied normally — only the specific `(Running, Ready)` transition is gated.
+///
+/// When `hooks_active` is false (Generic agents, sessions without hooks), this is
+/// identical to [`emit_on_change`], preserving the M2 stopgap behavior where
+/// quiescence drives `Running → Idle`.
+///
+/// Design rationale (D24): hooks are the AUTHORITATIVE signal for a Cooperative
+/// agent's turn end. A single 200ms quiescent tick is NOT reliable evidence that the
+/// agent has finished — Claude Code may pause output briefly mid-computation. The
+/// hook `Stop` event fires deterministically when the agent's turn actually ends.
+fn emit_scraping_guarded(
+    runner: &dyn AgentRunner,
+    sessions: &SessionRegistry,
+    id: &SessionId,
+    signal: &OutputSignal,
+    hooks_active: bool,
+    emit: &mut impl FnMut(StatusChanged),
+) {
+    use spectty_core::entities::agent_status::Observed;
+    use spectty_core::AgentStatus;
+
+    if !hooks_active {
+        // No hooks for this session: use the normal path (M2 stopgap preserved).
+        return emit_on_change(runner, sessions, id, signal, emit);
+    }
+
+    // Hooks active: gate out scraping-derived Ready from the Running state.
+    // Call detect_status directly so we can inspect the observation before applying it.
+    let Some(observed) = runner.detect_status(signal) else {
+        return; // no confident observation this tick → nothing to do
+    };
+
+    if observed == Observed::Ready {
+        // Check the session's current status to decide whether to suppress.
+        // TOCTOU note: we read status outside the registry lock; if the status changes
+        // between the read and the apply_observed call below, the worst case is we
+        // allow a Ready to reach a non-Running state (harmless — transition() is a
+        // legal no-op or a correct transition for non-Running states).
+        let current_status = sessions.get(id).map(|s| s.status);
+        if current_status == Some(AgentStatus::Running) {
+            // Suppress: only a hook Stop drives Running→Idle when hooks are active.
+            return;
+        }
+    }
+
+    // Apply the observation normally (non-Ready, or Ready from non-Running state).
+    if let Some(status) = sessions.apply_observed(id, observed) {
         emit(StatusChanged {
             session_id: id.clone(),
             status,
@@ -813,6 +901,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            env: Vec::new(),
         };
         let (mut adapter, mut reader) = PtyAdapter::spawn(&cfg).expect("real pty spawns");
 
@@ -872,6 +961,113 @@ mod tests {
         assert_eq!(
             sessions.get(&id).expect("present").status,
             AgentStatus::Completed
+        );
+    }
+
+    // ── C1 RED→GREEN: single-tick scraping quiescence must NOT flip Running→Idle
+    //    when hooks are active for the session (D24 option b).
+    //
+    // The adversarial defect: `ClaudeCodeRunner::detect_status` returns
+    // `Observed::Ready` on EVERY quiescent tick (is_active=false, no pattern
+    // match). With `(Running, Ready) => Idle` in the transition table, a working
+    // agent that pauses output for one 200ms QUIESCE tick flips Running→Idle via
+    // scraping — BEFORE the hook Stop fires.
+    //
+    // Fix: when the hook reader's path is non-empty (hooks provisioned for this
+    // session), `emit_scraping_guarded` suppresses scraping-derived Ready from
+    // the Running state. Only a hook Stop event may drive Running→Idle.
+    //
+    // This test exercises `emit_scraping_guarded` DIRECTLY (private function,
+    // accessible from the same module's test block) to avoid the 200ms QUIESCE
+    // timeout required to trigger the loop's Quiesce arm. It uses the REAL
+    // `ClaudeCodeRunner` (not ScriptedRunner) and simulates a quiescent signal
+    // (is_active=false, no pattern) — the same scenario the Quiesce arm produces.
+
+    #[test]
+    fn c1_scraping_quiescence_does_not_flip_running_to_idle_when_hooks_active() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session starts in Running — the agent is mid-turn.
+        let (sessions, id) = registry_with(AgentStatus::Running);
+        // REAL ClaudeCodeRunner: quiescent signal (is_active=false, no pattern) → Ready.
+        let runner = ClaudeCodeRunner::new();
+
+        // A quiescent signal — exactly what the Quiesce arm produces for a silent PTY.
+        // ClaudeCodeRunner returns Observed::Ready for is_active=false + no pattern match.
+        let quiescent_signal = OutputSignal {
+            text_window: "bypass permissions on (shift+tab to cycle)".to_string(),
+            is_active: false,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 250, // 250ms quiescent
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+
+        // hooks_active = true: non-empty path simulates hooks provisioned for this session.
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &quiescent_signal,
+            true, // hooks_active = true → gate must suppress Running→Idle
+            &mut |sc| emitted.push(sc),
+        );
+
+        // With hooks active, a quiescent tick must NOT flip Running→Idle.
+        assert!(
+            emitted.is_empty(),
+            "C1: with hooks_active=true, a quiescent Ready observation from Running \
+             must be suppressed; got {:?}",
+            emitted.iter().map(|sc| sc.status).collect::<Vec<_>>()
+        );
+        // Session must still be Running — the gate must not have applied any transition.
+        assert_eq!(
+            sessions.get(&id).expect("present").status,
+            AgentStatus::Running,
+            "session must remain Running after hook-gated quiescent tick"
+        );
+    }
+
+    // Complementary test: WITHOUT hooks active (hooks_active=false), the same
+    // quiescent signal MUST flip Running→Idle (M2 stopgap preserved).
+    #[test]
+    fn c1_scraping_quiescence_still_drives_running_to_idle_when_no_hooks() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session starts in Running — the agent is mid-turn.
+        let (sessions, id) = registry_with(AgentStatus::Running);
+        let runner = ClaudeCodeRunner::new();
+
+        // Same quiescent signal as the hooks-active test.
+        let quiescent_signal = OutputSignal {
+            text_window: "bypass permissions on (shift+tab to cycle)".to_string(),
+            is_active: false,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 250,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+
+        // hooks_active = false: empty path simulates no hooks for this session (M2 stopgap mode).
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &quiescent_signal,
+            false, // hooks_active = false → normal M2 stopgap, no gate
+            &mut |sc| emitted.push(sc),
+        );
+
+        // M2 stopgap: without hooks, quiescent scraping drives Running→Idle.
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert_eq!(
+            statuses,
+            vec![AgentStatus::Idle],
+            "M2 stopgap: with hooks_active=false, quiescent Ready must drive Running→Idle; got {statuses:?}"
         );
     }
 }
