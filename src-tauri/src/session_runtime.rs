@@ -187,15 +187,22 @@ fn signal_step(outcome: Result<Vec<u8>, RecvTimeoutError>) -> SignalAction {
 ///
 /// ## Hook-gate: suppress scraping-derived Ready on Running (C1 fix, D24 option b)
 ///
-/// When `hook_reader.path()` is non-empty (hooks are provisioned for this session),
-/// scraping-derived `Observed::Ready` is suppressed from the `Running` state on the
-/// Ingest and Quiesce arms. Only a hook `Stop` event may drive `Running → Idle` in
-/// that mode (D24 primary fix). This prevents a brief 200ms output pause from
-/// spuriously flipping a working agent to Idle before the Stop hook fires.
+/// When `hooks_active` is `true` (hooks are provisioned for this session, i.e. the
+/// caller passed a non-empty `hook_runtime_dir` at the wiring site), scraping-derived
+/// `Observed::Ready` is suppressed from the `Running` state on the Ingest and Quiesce
+/// arms. Only a hook `Stop` event may drive `Running → Idle` in that mode (D24
+/// primary fix). This prevents a brief 200ms output pause from spuriously flipping a
+/// working agent to Idle before the Stop hook fires.
 ///
-/// Sessions without hooks (`hook_reader.path()` is empty, i.e. Generic agents or
-/// sessions spawned without hook provisioning) keep the M2 stopgap behavior where
+/// Sessions without hooks (`hooks_active = false`, i.e. Generic agents or sessions
+/// spawned with an empty `hook_runtime_dir`) keep the M2 stopgap behavior where
 /// quiescence drives `Running → Idle` via scraping.
+///
+/// `hooks_active` MUST be computed at the wiring site as `!hook_runtime_dir.is_empty()`
+/// BEFORE constructing the `StateFileReader`. Do NOT derive it from `hook_reader.path()`
+/// after construction: `StateFileReader::new("", id)` builds path `"/spectty-{id}.state"`
+/// (non-empty), so path-based derivation is ALWAYS true regardless of whether hooks
+/// are provisioned — the session-local empty-string convention is lost.
 ///
 /// The EOF arm always applies the quiescent snapshot WITHOUT the gate so a session
 /// that exits while Running can still reach Idle → Completed via the normal EOF path.
@@ -212,9 +219,10 @@ fn signal_step(outcome: Result<Vec<u8>, RecvTimeoutError>) -> SignalAction {
 /// `Starting -> Idle/Running -> Completed` path even for a command that exits almost
 /// immediately. The ordering is enforced HERE (the EOF arm), backed by
 /// `OutputSignalProducer::mark_exit` never erasing the window.
-// The `hook_reader` param was added by WU-7; the total is 8 args. `#[allow]` keeps the
-// public API as a free function (not a builder or struct) which matches the existing
-// testability discipline — every collaborator is explicit in the call site.
+// The `hook_reader` param was added by WU-7 and `hooks_active` by the C1 re-review
+// fix; the total is 9 args. `#[allow]` keeps the public API as a free function (not
+// a builder or struct) which matches the existing testability discipline — every
+// collaborator is explicit in the call site.
 #[allow(clippy::too_many_arguments)]
 pub fn run_signal_loop(
     rx: &Receiver<Vec<u8>>,
@@ -223,6 +231,9 @@ pub fn run_signal_loop(
     id: &SessionId,
     clock: &dyn ClockPort,
     hook_reader: &mut StateFileReader,
+    // Computed at the wiring site as `!hook_runtime_dir.is_empty()` BEFORE constructing
+    // the `StateFileReader` — see the rustdoc above for why path-based derivation fails.
+    hooks_active: bool,
     exit_code_on_eof: impl Fn() -> i32,
     mut emit: impl FnMut(StatusChanged),
 ) {
@@ -230,11 +241,10 @@ pub fn run_signal_loop(
     // Last instant a byte was seen, so quiescent ticks can compute a real `idle_ms`.
     let mut last_byte_at = clock.now();
 
-    // C1 FIX (D24 option b): when hooks are provisioned for this session (non-empty
-    // path), suppress scraping-derived Ready from the Running state on Ingest/Quiesce
-    // arms so only a hook Stop event can drive Running→Idle. Sessions without hooks
-    // (empty path) keep M2 stopgap behavior where quiescence drives Running→Idle.
-    let hooks_active = !hook_reader.path().is_empty();
+    // `hooks_active` is passed in explicitly by the caller — computed at the wiring
+    // site as `!hook_runtime_dir.is_empty()`. See rustdoc above: deriving it here
+    // from `hook_reader.path()` would always be true because StateFileReader::new("", id)
+    // builds path "/spectty-{id}.state" (non-empty), losing the empty-dir convention.
 
     // The read closure for the hook reader: wraps `std::fs::read_to_string` into
     // the `Fn(&str) -> io::Result<Option<String>>` seam. Absent files → `Ok(None)`.
@@ -601,7 +611,8 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
-            || 0, // clean exit
+            false, // no hooks for this test session
+            || 0,  // clean exit
             |sc| emitted.push(sc),
         );
 
@@ -653,6 +664,7 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
+            false, // no hooks for this test session
             || 0,
             |sc| emitted.push(sc),
         );
@@ -724,6 +736,7 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
+            true, // hooks are active: runtime_dir is non-empty
             || 0,
             |sc| emitted.push(sc),
         );
@@ -778,6 +791,7 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
+            true, // hooks are active: runtime_dir is non-empty
             || 0,
             |sc| emitted.push(sc),
         );
@@ -819,6 +833,7 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
+            false, // no hooks for this test (nonexistent runtime dir)
             || 0,
             |sc| emitted.push(sc),
         );
@@ -860,6 +875,7 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
+            true, // hooks provisioned (non-empty runtime_dir), but file is malformed
             || 0,
             |sc| emitted.push(sc),
         );
@@ -867,6 +883,7 @@ mod tests {
         let _ = std::fs::remove_file(&state_path);
 
         // PTY scraping still fires normally (Starting→Idle via Ready).
+        // Session is Starting (not Running), so the hook gate does not apply here.
         let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
         assert!(
             statuses.contains(&AgentStatus::Idle),
@@ -939,6 +956,7 @@ mod tests {
             &id,
             &clock,
             &mut hook_reader,
+            false, // no hooks for this integration test
             || 0,
             |sc| emitted.push(sc),
         );
@@ -1068,6 +1086,103 @@ mod tests {
             statuses,
             vec![AgentStatus::Idle],
             "M2 stopgap: with hooks_active=false, quiescent Ready must drive Running→Idle; got {statuses:?}"
+        );
+    }
+
+    // ── C1 RE-REVIEW RED TEST: empty hook_runtime_dir must NOT suppress scraping ──
+    //
+    // Defect (confirmed adversarial re-review): `StateFileReader::new("", session_id)`
+    // builds path `"/spectty-{id}.state"` — NON-empty — so the gate
+    // `let hooks_active = !hook_reader.path().is_empty()` at line 237 is ALWAYS true,
+    // even for no-hooks/Generic sessions that pass an empty runtime_dir.
+    //
+    // Consequence: for Generic sessions the Quiesce arm's `emit_scraping_guarded`
+    // call always applies the hook gate, suppressing scraping-derived Ready from the
+    // Running state so the Quiesce arm can NEVER drive Running→Idle for these sessions.
+    //
+    // The session remains Running after the Quiesce arm fires; only the EOF arm
+    // (intentionally ungated) can eventually drive Running→Idle. For a long-running
+    // PTY process the badge sticks on Running until the process exits.
+    //
+    // This test MUST FAIL on current code: it exercises the Quiesce arm by holding
+    // the channel open for one QUIESCE interval, then checks the status BEFORE
+    // dropping tx (before EOF fires). The Quiesce arm must have driven Running→Idle;
+    // the always-true gate prevents this on current code.
+    //
+    // Fix (GREEN step): pass `hooks_active: bool` explicitly into `run_signal_loop`,
+    // computed at the wiring site as `!hook_runtime_dir.is_empty()`.
+    #[test]
+    fn no_hooks_session_quiesce_arm_still_drives_running_to_idle() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use std::sync::{Arc, Mutex};
+
+        // Generic / no-hooks session: starts Running.
+        // The wiring site passes empty runtime_dir → StateFileReader::new("", id)
+        // builds path "/spectty-{id}.state" (NON-empty), triggering the always-true
+        // hooks_active gate on current code.
+        let (sessions, id) = registry_with(AgentStatus::Running);
+
+        let sessions = Arc::new(sessions);
+        let id_arc = Arc::new(id);
+        let emitted: Arc<Mutex<Vec<StatusChanged>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let sessions_t = Arc::clone(&sessions);
+        let id_t = Arc::clone(&id_arc);
+        let emitted_t = Arc::clone(&emitted);
+
+        let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
+
+        // Run the signal loop on a background thread. Keep `tx` alive so the loop's
+        // recv_timeout fires at least one Quiesce arm tick before EOF.
+        let handle = std::thread::spawn(move || {
+            // ClaudeCodeRunner: quiescent signal (is_active=false, no pattern) → Ready.
+            let runner = ClaudeCodeRunner::new();
+            let clock = FakeClock::at(0);
+            // EMPTY runtime_dir — exactly what no-hooks/Generic sessions pass at the
+            // wiring site (session.rs:559-563). This builds path "/spectty-{id}.state"
+            // which is NON-empty, causing hooks_active=true on current code.
+            let mut hook_reader = StateFileReader::new("", &id_t.0);
+            // hooks_active = !hook_runtime_dir.is_empty() = !"".is_empty() = false
+            // This is the correct value for a no-hooks session at the wiring site.
+            // On the OLD buggy code: hooks_active = !hook_reader.path().is_empty()
+            //   = !"/spectty-{id}.state".is_empty() = TRUE → gate suppresses Running→Idle.
+            // With the fix: hooks_active is passed explicitly as false → gate disabled.
+            run_signal_loop(
+                &rx,
+                &runner,
+                &sessions_t,
+                &id_t,
+                &clock,
+                &mut hook_reader,
+                false, // !hook_runtime_dir.is_empty() where runtime_dir = ""
+                || 0,
+                |sc| emitted_t.lock().unwrap().push(sc),
+            );
+        });
+
+        // Wait one full QUIESCE interval (200ms) for the Quiesce arm to fire at least
+        // once. At this point, if the bug is present, the Quiesce arm has suppressed
+        // Ready from Running → session is still Running. If fixed, session is Idle.
+        std::thread::sleep(QUIESCE + Duration::from_millis(30));
+
+        // Check the status BEFORE dropping tx: this isolates the Quiesce arm's effect
+        // from the EOF arm (which is intentionally ungated and would also drive Idle).
+        let status_after_quiesce = sessions.get(&id_arc).map(|s| s.status);
+
+        // Drop tx to stop the loop.
+        drop(tx);
+        handle.join().unwrap();
+
+        // The Quiesce arm must have driven Running→Idle via scraping-derived Ready
+        // while the channel was still open (i.e. before EOF).
+        // On current code: hooks_active = !"/spectty-{id}.state".is_empty() = TRUE
+        // → Quiesce arm suppresses Ready from Running → session stays Running here.
+        assert_eq!(
+            status_after_quiesce,
+            Some(AgentStatus::Idle),
+            "C1 re-review: no-hooks session with empty runtime_dir must reach Idle via \
+             the Quiesce arm (Running→Idle M2 stopgap) BEFORE EOF fires; \
+             got {status_after_quiesce:?}"
         );
     }
 }

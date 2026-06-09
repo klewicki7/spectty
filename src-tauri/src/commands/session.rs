@@ -552,10 +552,14 @@ pub async fn spawn_session(
             // C1 FIX (D24): only pass the real runtime_dir when hooks are provisioned
             // for this session (i.e. the agent requires_provisioning and a hooks handle
             // was injected). For Generic agents (no hooks), pass empty string so
-            // hook_reader.path() is empty → poll always returns None → scraping drives
-            // all transitions as in M2. For Cooperative agents with hooks, the non-empty
-            // path activates the hook-gating in run_signal_loop that suppresses a single-
+            // hooks_active = !hook_runtime_dir.is_empty() = false → M2 stopgap scraping
+            // drives all transitions (quiescence drives Running→Idle as before). For
+            // Cooperative agents with hooks, the non-empty path means hooks_active=true
+            // which activates the hook-gating in run_signal_loop that suppresses a single-
             // tick scraping Ready from flipping Running→Idle (only a hook Stop can do that).
+            // NOTE: do NOT derive hooks_active from hook_reader.path() after construction —
+            // StateFileReader::new("", id) builds "/spectty-{id}.state" (non-empty),
+            // losing the empty-string convention. See run_signal_loop rustdoc.
             let hook_runtime_dir = if hooks_handle_for_state.is_some() {
                 crate::spectty_runtime_dir()
             } else {
@@ -753,6 +757,12 @@ fn spawn_session_threads(
             // The runtime dir and session id are resolved by spawn_session (WU-8) and
             // forwarded here. For cooperative agents this points at the real state
             // file; for Generic agents hook_runtime_dir is empty → poll returns None.
+            //
+            // hooks_active MUST be derived from hook_runtime_dir BEFORE building the
+            // StateFileReader. Deriving it from hook_reader.path() after construction
+            // is always true because StateFileReader::new("", id) builds path
+            // "/spectty-{id}.state" (non-empty) — the empty-dir convention is lost.
+            let hooks_active = !hook_runtime_dir.is_empty();
             let mut hook_reader = StateFileReader::new(&hook_runtime_dir, &hook_session_id);
             run_signal_loop(
                 &signal_rx,
@@ -761,6 +771,7 @@ fn spawn_session_threads(
                 &signal_id,
                 &clock,
                 &mut hook_reader,
+                hooks_active,
                 // M2 cannot retrieve the real child exit code from the read side
                 // without owning the child handle (same limitation as M1 `pty_exit`),
                 // so EOF reports a clean exit; the terminal status is `Completed`.
