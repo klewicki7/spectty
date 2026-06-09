@@ -36,6 +36,17 @@ trait AgentRunner: Send + Sync {
 }
 ```
 
+> **Superseded for M2+ (2026-06-08, change `M2-spawn-agent-provisioner`, ADR D7/R9).**
+> The `provisioner()` method shown above did NOT ship on the M2 `AgentRunner` trait.
+> Provisioning moved to a **separate Core port**, `ProvisioningPort`
+> (`crates/core/src/ports/provisioning.rs`), because injection/retraction is a
+> session-lifecycle concern, not a per-output-tick concern. Generic agents skip it via
+> `AgentDescriptor.requires_provisioning == false` — no `Option`/trait-method ceremony on
+> the runner. The shipped trait has five methods (`launch_spec`, `detect_status`,
+> `parse_cost`, `quick_actions`, `descriptor`) and **no `provisioner()`**. The CODE is the
+> source of truth (`crates/core/src/ports/agent_runner.rs`). See
+> [ADR-0004 → Amendment](../decisions/0004-agent-agnostic-core.md#amendment--superseded-for-m2-provisioning-is-a-sibling-core-port-not-a-runner-method).
+
 `OutputSignal` is a normalized, decoded view of recent PTY output plus process state —
 adapters never parse raw ANSI; the PTY adapter pre-decodes it.
 
