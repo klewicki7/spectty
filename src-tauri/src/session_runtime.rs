@@ -1160,14 +1160,20 @@ mod tests {
             );
         });
 
-        // Wait one full QUIESCE interval (200ms) for the Quiesce arm to fire at least
-        // once. At this point, if the bug is present, the Quiesce arm has suppressed
-        // Ready from Running → session is still Running. If fixed, session is Idle.
-        std::thread::sleep(QUIESCE + Duration::from_millis(30));
-
-        // Check the status BEFORE dropping tx: this isolates the Quiesce arm's effect
-        // from the EOF arm (which is intentionally ungated and would also drive Idle).
-        let status_after_quiesce = sessions.get(&id_arc).map(|s| s.status);
+        // Wait for the Quiesce arm to fire and drive Running→Idle, polling with a
+        // generous deadline. A single fixed sleep of QUIESCE+30ms is flaky on loaded
+        // CI runners: the loop thread's 200ms recv_timeout may not have elapsed AND
+        // been processed within that thin margin. Polling while `tx` is still alive
+        // keeps EOF out of the picture, so an observed Idle can only come from the
+        // Quiesce arm — the assertion's meaning is unchanged.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut status_after_quiesce = sessions.get(&id_arc).map(|s| s.status);
+        while status_after_quiesce != Some(AgentStatus::Idle)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+            status_after_quiesce = sessions.get(&id_arc).map(|s| s.status);
+        }
 
         // Drop tx to stop the loop.
         drop(tx);
