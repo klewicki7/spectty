@@ -15,6 +15,8 @@ import {
 export interface UseSession {
   session: SessionSummary | null;
   status: AgentStatus | null;
+  /** Non-null when the last spawn attempt rejected. Cleared on next spawn. */
+  error: string | null;
   spawn: (
     agent: AgentSpec,
     workspacePath: string,
@@ -41,6 +43,7 @@ const DEFAULT_ROWS = 24;
 export function useSession(): UseSession {
   const [session, setSession] = useState<SessionSummary | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // The live session id is mirrored in a ref so the event listeners (registered
   // once on mount) always filter against the CURRENT session without re-subscribing.
@@ -81,20 +84,26 @@ export function useSession(): UseSession {
     title: string,
     onOutput?: Channel<unknown>,
   ): Promise<void> => {
-    const channel = onOutput ?? new Channel<unknown>();
-    const id = await spawnSession(
-      agent,
-      workspacePath,
-      title,
-      DEFAULT_COLS,
-      DEFAULT_ROWS,
-      channel,
-    );
-    // Seed the local projection from the returned id; the authoritative status
-    // arrives via `status_changed` (Starting → …). `session_created` would also
-    // carry the full summary, but seeding here keeps the UI responsive.
-    setSession({ id, title, status: "Starting", agent_kind: agent.kind });
-    setStatus("Starting");
+    // Clear any previous error so the UI resets on each attempt.
+    setError(null);
+    try {
+      const channel = onOutput ?? new Channel<unknown>();
+      const id = await spawnSession(
+        agent,
+        workspacePath,
+        title,
+        DEFAULT_COLS,
+        DEFAULT_ROWS,
+        channel,
+      );
+      // Seed the local projection from the returned id; the authoritative status
+      // arrives via `status_changed` (Starting → …). `session_created` would also
+      // carry the full summary, but seeding here keeps the UI responsive.
+      setSession({ id, title, status: "Starting", agent_kind: agent.kind });
+      setStatus("Starting");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const close = async (): Promise<void> => {
@@ -107,5 +116,5 @@ export function useSession(): UseSession {
     setStatus(null);
   };
 
-  return { session, status, spawn, close };
+  return { session, status, error, spawn, close };
 }

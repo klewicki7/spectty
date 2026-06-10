@@ -26,7 +26,7 @@ import { createBufferedOutputChannel } from "./hooks/useSessionTerminal";
  * session bleed.
  */
 export function App() {
-  const { session, status, spawn, close } = useSession();
+  const { session, status, error, spawn, close } = useSession();
 
   // A stable ref holds the current session's buffered output channel. A new
   // channel is created each time the user spawns so old messages from a
@@ -40,6 +40,11 @@ export function App() {
         status={status}
         onClose={session !== null ? () => void close() : undefined}
       />
+      {error !== null && (
+        <p role="alert" className="spawn-error">
+          Spawn failed: {error}
+        </p>
+      )}
       {session === null ? (
         <>
           <SpawnDialog

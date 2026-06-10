@@ -168,4 +168,53 @@ describe("useSession", () => {
       expect(result.current.status).toBeNull();
     });
   });
+
+  it("spawn() rejection surfaces as error — hook stores the message", async () => {
+    invokeMock.mockRejectedValue(new Error("provisioning io error: No such file or directory (os error 2)"));
+    const { result } = renderHook(() => useSession());
+
+    await act(async () => {
+      // spawn() must NOT throw; the rejection is swallowed into the error state
+      await result.current.spawn(claudeSpec, "/repo", "My Agent");
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toMatch(/provisioning io error/);
+    });
+    // session stays null — spawn did not succeed
+    expect(result.current.session).toBeNull();
+  });
+
+  it("error is null when spawn succeeds", async () => {
+    const { result } = renderHook(() => useSession());
+
+    await act(async () => {
+      await result.current.spawn(claudeSpec, "/repo", "My Agent");
+    });
+
+    await waitFor(() => expect(result.current.session?.id).toBe("session-1"));
+    expect(result.current.error).toBeNull();
+  });
+
+  it("error is cleared on the next spawn attempt", async () => {
+    // First spawn: fails
+    invokeMock.mockRejectedValueOnce(new Error("hooks provisioning inject failed"));
+    const { result } = renderHook(() => useSession());
+
+    await act(async () => {
+      await result.current.spawn(claudeSpec, "/repo", "My Agent");
+    });
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+
+    // Second spawn: succeeds
+    invokeMock.mockResolvedValue("session-1");
+    await act(async () => {
+      await result.current.spawn(claudeSpec, "/repo", "My Agent");
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toBeNull();
+      expect(result.current.session?.id).toBe("session-1");
+    });
+  });
 });
