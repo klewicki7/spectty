@@ -27,16 +27,19 @@ struct ClaudePatterns {
     ready: &'static [&'static str],
 }
 
-/// The M2 placeholder pattern table. These literal substrings are refined against a
-/// real Claude Code session during manual acceptance (exit-criterion 3).
+/// The empirical pattern table, refined against a real Claude Code v2.1.172 session
+/// during M3 manual acceptance (criterion 11.3).
+///
+/// Patterns are stored WITHOUT whitespace and matched against a whitespace-stripped
+/// copy of the text window: Claude Code's Ink renderer emits runs of spaces as
+/// cursor-forward CSI sequences (not literal 0x20 bytes), so the ANSI-stripped
+/// window concatenates words ("Doyouwanttoproceed?", "❯1.Yes"). Stripping
+/// whitespace from BOTH sides makes the match rendering-independent — literal
+/// spaces, cursor-forward gaps, and line wraps all collapse to the same key.
+/// The `claude_patterns_contain_no_whitespace` test pins this invariant.
 const CLAUDE_PATTERNS: ClaudePatterns = ClaudePatterns {
-    awaiting_input: &[
-        "Do you want to",
-        "❯ 1. Yes",
-        "(y/n)",
-        "Press Enter to continue",
-    ],
-    ready: &["? for shortcuts"],
+    awaiting_input: &["Doyouwantto", "❯1.Yes", "(y/n)", "PressEntertocontinue"],
+    ready: &["?forshortcuts"],
 };
 
 /// First-class runner for Claude Code (Cooperative tier).
@@ -58,7 +61,7 @@ impl Default for ClaudeCodeRunner {
 }
 
 impl ClaudeCodeRunner {
-    /// Build a runner with the built-in M2 pattern table.
+    /// Build a runner with the built-in empirical pattern table.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -84,20 +87,24 @@ impl AgentRunner for ClaudeCodeRunner {
             Some(_) => return Some(Observed::Failed),
             None => {}
         }
+        // Whitespace-stripped view of the window: Ink renders space runs as
+        // cursor-forward CSI sequences, so the ANSI-stripped window concatenates
+        // words. Patterns are stored whitespace-free (see CLAUDE_PATTERNS) and
+        // matched against this compact view so both renderings match.
+        let compact: String = signal
+            .text_window
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         if self
             .patterns
             .awaiting_input
             .iter()
-            .any(|p| signal.text_window.contains(p))
+            .any(|p| compact.contains(p))
         {
             return Some(Observed::NeedsInput);
         }
-        if self
-            .patterns
-            .ready
-            .iter()
-            .any(|p| signal.text_window.contains(p))
-        {
+        if self.patterns.ready.iter().any(|p| compact.contains(p)) {
             return Some(Observed::Ready);
         }
         if signal.is_active {
@@ -245,6 +252,48 @@ mod tests {
             runner.detect_status(&signal("Do you want to proceed?", true, None)),
             Some(Observed::NeedsInput)
         );
+    }
+
+    #[test]
+    fn claude_detect_status_space_stripped_permission_dialog_is_needs_input() {
+        // REAL window captured from Claude Code v2.1.172 inside Spectty (M3
+        // acceptance 11.3): Ink renders runs of spaces as cursor-forward CSI
+        // sequences, NOT literal 0x20 bytes, so the ANSI-stripped text window
+        // concatenates words ("Doyouwanttoproceed?", "❯1.Yes"). Pattern matching
+        // must therefore be whitespace-insensitive — spaced patterns can NEVER
+        // match this rendering.
+        let runner = ClaudeCodeRunner::new();
+        let window = "Bash command\r\r\r\ntouch/tmp/claude-permission-test&&echo\"permisoconcedido\"\r\r\nCreateaharmlesstestfilein/tmp\r\r\n\r\r\nDoyouwanttoproceed?\r\r\n❯1.Yes\r\r\n2.Yes,andalwaysallowaccesstotmp/fromthisproject\r\r\n3.No\r\r\n\r\r\nEsctocancel·Tabtoamend·ctrl+etoexplain";
+        // While the dialog sits quiescent on screen…
+        assert_eq!(
+            runner.detect_status(&signal(window, false, None)),
+            Some(Observed::NeedsInput),
+            "quiescent space-stripped permission dialog must observe NeedsInput"
+        );
+        // …and while the TUI is still actively redrawing it.
+        assert_eq!(
+            runner.detect_status(&signal(window, true, None)),
+            Some(Observed::NeedsInput),
+            "active space-stripped permission dialog must observe NeedsInput"
+        );
+    }
+
+    #[test]
+    fn claude_patterns_contain_no_whitespace() {
+        // DATA pin: detect_status matches patterns against a whitespace-stripped
+        // window, so a pattern containing whitespace can never match. Adding one
+        // is a silent dead pattern — this test makes it loud.
+        for pattern in CLAUDE_PATTERNS
+            .awaiting_input
+            .iter()
+            .chain(CLAUDE_PATTERNS.ready)
+        {
+            assert!(
+                !pattern.chars().any(char::is_whitespace),
+                "pattern {pattern:?} contains whitespace — it can never match the \
+                 whitespace-stripped window"
+            );
+        }
     }
 
     #[test]
