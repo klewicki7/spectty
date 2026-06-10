@@ -185,14 +185,15 @@ fn signal_step(outcome: Result<Vec<u8>, RecvTimeoutError>) -> SignalAction {
 /// closure that returns `Ok(Some(contents))` / `Ok(None)` / `Err(_)`.  This keeps
 /// the loop Tauri-free: `run_signal_loop` never performs I/O directly.
 ///
-/// ## Hook-gate: suppress scraping-derived Ready on Running (C1 fix, D24 option b)
+/// ## Hook-gate: suppress the scraping legs that hooks own (C1 fix + Working-bounce fix)
 ///
 /// When `hooks_active` is `true` (hooks are provisioned for this session, i.e. the
-/// caller passed a non-empty `hook_runtime_dir` at the wiring site), scraping-derived
-/// `Observed::Ready` is suppressed from the `Running` state on the Ingest and Quiesce
-/// arms. Only a hook `Stop` event may drive `Running → Idle` in that mode (D24
-/// primary fix). This prevents a brief 200ms output pause from spuriously flipping a
-/// working agent to Idle before the Stop hook fires.
+/// caller passed a non-empty `hook_runtime_dir` at the wiring site), the Ingest and
+/// Quiesce arms suppress scraping-derived `Ready` from `Running` (only a hook `Stop`
+/// may end a turn — a brief 200ms output pause is not reliable evidence) AND
+/// scraping-derived `Working` from `Idle`/`Starting` (only a hook `Submit` may start
+/// a turn — the idle TUI redraw would otherwise bounce a hook-sourced `Idle` back to
+/// `Running`). See [`emit_scraping_guarded`] for the full gate table.
 ///
 /// Sessions without hooks (`hooks_active = false`, i.e. Generic agents or sessions
 /// spawned with an empty `hook_runtime_dir`) keep the M2 stopgap behavior where
@@ -345,13 +346,21 @@ fn emit_on_change(
     }
 }
 
-/// C1 FIX (D24 option b): scraping path with hook-gate for the Ingest/Quiesce arms.
+/// C1 FIX (D24 option b) + acceptance Working-bounce fix: scraping path with
+/// hook-gate for the Ingest/Quiesce arms.
 ///
 /// When `hooks_active` is true (the session has hooks provisioned), this function
-/// suppresses scraping-derived `Observed::Ready` from the `Running` state so that
-/// only a hook `Stop` event may drive `Running → Idle`. All other observations
-/// (Working, NeedsInput, Finished, Failed, and Ready from non-Running states) are
-/// applied normally — only the specific `(Running, Ready)` transition is gated.
+/// suppresses the scraping-derived observations whose transitions hooks own:
+/// - `(Running, Ready)` — only a hook `Stop` event may drive `Running → Idle` (C1);
+/// - `(Idle, Working)` and `(Starting, Working)` — only a hook `Submit` event may
+///   start a turn. Claude Code's TUI redraws even at its idle prompt, so scraped
+///   `Working` would bounce a hook-sourced `Idle` back to `Running`, and boot
+///   banner output would trap a `Starting` session at `Running` (where the C1
+///   gate blocks the only scraping exit).
+///
+/// All other observations (NeedsInput, Finished, Failed, Ready from non-Running
+/// states, and Working from `AwaitingInput` — the only path out after a permission
+/// approval, which fires no hook) are applied normally.
 ///
 /// When `hooks_active` is false (Generic agents, sessions without hooks), this is
 /// identical to [`emit_on_change`], preserving the M2 stopgap behavior where
@@ -377,26 +386,40 @@ fn emit_scraping_guarded(
         return emit_on_change(runner, sessions, id, signal, emit);
     }
 
-    // Hooks active: gate out scraping-derived Ready from the Running state.
+    // Hooks active: gate the scraping legs that hooks own (D24, hooks authoritative).
     // Call detect_status directly so we can inspect the observation before applying it.
     let Some(observed) = runner.detect_status(signal) else {
         return; // no confident observation this tick → nothing to do
     };
 
-    if observed == Observed::Ready {
-        // Check the session's current status to decide whether to suppress.
-        // TOCTOU note: we read status outside the registry lock; if the status changes
-        // between the read and the apply_observed call below, the worst case is we
-        // allow a Ready to reach a non-Running state (harmless — transition() is a
-        // legal no-op or a correct transition for non-Running states).
-        let current_status = sessions.get(id).map(|s| s.status);
-        if current_status == Some(AgentStatus::Running) {
-            // Suppress: only a hook Stop drives Running→Idle when hooks are active.
-            return;
-        }
+    // TOCTOU note: we read status outside the registry lock; if the status changes
+    // between the read and the apply_observed call below, the worst case is one
+    // scraped observation reaching a state it would otherwise be gated from —
+    // harmless, because `transition()` is a legal no-op or a correct transition
+    // for every (state, observation) pair.
+    let current_status = sessions.get(id).map(|s| s.status);
+    let suppressed = matches!(
+        (current_status, observed),
+        // Only a hook Stop drives Running→Idle: a 200ms output pause is not
+        // reliable evidence that the turn ended (C1 fix).
+        (Some(AgentStatus::Running), Observed::Ready)
+            // Only a hook Submit starts a turn: Claude Code's TUI redraws even at
+            // its idle prompt, so scraped Working would bounce a hook-sourced Idle
+            // straight back to Running (acceptance Working-bounce fix). Same gate
+            // for Starting: boot banner output would otherwise trap the session at
+            // Running, where the (Running, Ready) gate blocks the only scraping
+            // exit. The (AwaitingInput, Working) leg stays open — no hook fires
+            // when the user approves a permission prompt.
+            | (
+                Some(AgentStatus::Idle) | Some(AgentStatus::Starting),
+                Observed::Working
+            )
+    );
+    if suppressed {
+        return;
     }
 
-    // Apply the observation normally (non-Ready, or Ready from non-Running state).
+    // Apply the observation normally (every non-gated (state, observation) pair).
     if let Some(status) = sessions.apply_observed(id, observed) {
         emit(StatusChanged {
             session_id: id.clone(),
@@ -1086,6 +1109,178 @@ mod tests {
             statuses,
             vec![AgentStatus::Idle],
             "M2 stopgap: with hooks_active=false, quiescent Ready must drive Running→Idle; got {statuses:?}"
+        );
+    }
+
+    // ── M3 ACCEPTANCE FIX (Working-bounce): scraping Working must not bounce
+    //    hook-sourced Idle back to Running, nor trap a booting session ──────────
+    //
+    // The acceptance defect (observed live, instrumented run): Claude Code's TUI
+    // redraws continuously even at its idle prompt (status bar / spinner area), so
+    // every Ingest tick has `is_active=true` → `detect_status` observes `Working`.
+    // One tick after the hook Stop drives Running→Idle, scraping applies
+    // `(Idle, Working) → Running` and the badge bounces back — appearing stuck.
+    // The same observation at boot applies `(Starting, Working) → Running`, after
+    // which the C1 gate blocks the only scraping exit (Running→Idle) and the
+    // session is trapped at Running until the first hook event.
+    //
+    // Fix: when hooks are active, scraping-derived `Working` is suppressed from
+    // `Idle` AND `Starting` — only the hook Submit event may start a turn. The
+    // `(AwaitingInput, Working)` leg stays OPEN because no hook fires when the
+    // user approves a permission prompt (resume is only visible via PTY output).
+
+    #[test]
+    fn hook_gate_active_signal_does_not_bounce_idle_to_running() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session is Idle — the hook Stop just ended the turn.
+        let (sessions, id) = registry_with(AgentStatus::Idle);
+        let runner = ClaudeCodeRunner::new();
+
+        // An ACTIVE signal — exactly what the Ingest arm produces while the idle
+        // TUI keeps redrawing. ClaudeCodeRunner returns Observed::Working.
+        let active_signal = OutputSignal {
+            text_window: "bypass permissions on (shift+tab to cycle)".to_string(),
+            is_active: true,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 0,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &active_signal,
+            true, // hooks_active → only a hook Submit may drive Idle→Running
+            &mut |sc| emitted.push(sc),
+        );
+
+        assert!(
+            emitted.is_empty(),
+            "with hooks_active=true, scraped Working from Idle must be suppressed \
+             (TUI redraw must not bounce hook-sourced Idle back to Running); got {:?}",
+            emitted.iter().map(|sc| sc.status).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sessions.get(&id).expect("present").status,
+            AgentStatus::Idle,
+            "session must remain Idle after a hook-gated active tick"
+        );
+    }
+
+    #[test]
+    fn hook_gate_active_signal_does_not_drive_starting_to_running() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session is Starting — Claude Code is booting (banner output active).
+        let (sessions, id) = registry_with(AgentStatus::Starting);
+        let runner = ClaudeCodeRunner::new();
+
+        let active_signal = OutputSignal {
+            text_window: "Claude Code v2.1.172".to_string(),
+            is_active: true,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 0,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &active_signal,
+            true, // hooks_active → boot output must not trap the session at Running
+            &mut |sc| emitted.push(sc),
+        );
+
+        assert!(
+            emitted.is_empty(),
+            "with hooks_active=true, scraped Working from Starting must be suppressed \
+             (boot banner must not trap the session at Running); got {:?}",
+            emitted.iter().map(|sc| sc.status).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sessions.get(&id).expect("present").status,
+            AgentStatus::Starting,
+            "session must remain Starting until quiescence (→Idle) or a hook event"
+        );
+    }
+
+    #[test]
+    fn hook_gate_active_signal_still_drives_awaiting_input_to_running() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session is AwaitingInput — a permission prompt was raised (hook Permission).
+        let (sessions, id) = registry_with(AgentStatus::AwaitingInput);
+        let runner = ClaudeCodeRunner::new();
+
+        // The user approved; Claude resumes output. NO hook fires on approval, so
+        // scraping is the ONLY path out of AwaitingInput — it must stay open.
+        let active_signal = OutputSignal {
+            text_window: "resuming work".to_string(),
+            is_active: true,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 0,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &active_signal,
+            true, // hooks_active — but the AwaitingInput leg must NOT be gated
+            &mut |sc| emitted.push(sc),
+        );
+
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert_eq!(
+            statuses,
+            vec![AgentStatus::Running],
+            "scraped Working from AwaitingInput must still drive →Running (no hook \
+             fires on permission approval); got {statuses:?}"
+        );
+    }
+
+    #[test]
+    fn no_hooks_active_signal_still_drives_idle_to_running() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // M2 stopgap (no hooks): scraping drives ALL transitions, including Idle→Running.
+        let (sessions, id) = registry_with(AgentStatus::Idle);
+        let runner = ClaudeCodeRunner::new();
+
+        let active_signal = OutputSignal {
+            text_window: "working".to_string(),
+            is_active: true,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 0,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &active_signal,
+            false, // no hooks → M2 stopgap untouched
+            &mut |sc| emitted.push(sc),
+        );
+
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert_eq!(
+            statuses,
+            vec![AgentStatus::Running],
+            "M2 stopgap: with hooks_active=false, scraped Working must drive Idle→Running; got {statuses:?}"
         );
     }
 
