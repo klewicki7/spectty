@@ -356,11 +356,18 @@ fn emit_on_change(
 ///   start a turn. Claude Code's TUI redraws even at its idle prompt, so scraped
 ///   `Working` would bounce a hook-sourced `Idle` back to `Running`, and boot
 ///   banner output would trap a `Starting` session at `Running` (where the C1
-///   gate blocks the only scraping exit).
+///   gate blocks the only scraping exit);
+/// - `NeedsInput` from EVERY state — only a hook `Permission` event may enter
+///   `AwaitingInput`. A resolved dialog's text lingers in the rolling window until
+///   new output evicts it, so scraped NeedsInput would re-pin `AwaitingInput`
+///   long after the user answered;
+/// - `(AwaitingInput, Ready)` — only a hook `Stop` may resolve a pending dialog,
+///   so a quiet unrecognized dialog never flips to `Idle` while the user is still
+///   being asked.
 ///
-/// All other observations (NeedsInput, Finished, Failed, Ready from non-Running
-/// states, and Working from `AwaitingInput` — the only path out after a permission
-/// approval, which fires no hook) are applied normally.
+/// Still open for scraping: `(AwaitingInput, Working)` (the approval-resume leg —
+/// no hook fires when the user approves), `(Starting, Ready) → Idle` (boot),
+/// and `Finished`/`Failed` (exit codes).
 ///
 /// When `hooks_active` is false (Generic agents, sessions without hooks), this is
 /// identical to [`emit_on_change`], preserving the M2 stopgap behavior where
@@ -414,6 +421,15 @@ fn emit_scraping_guarded(
                 Some(AgentStatus::Idle) | Some(AgentStatus::Starting),
                 Observed::Working
             )
+            // Only a hook Permission enters AwaitingInput: after the user approves
+            // a dialog, its text lingers in the rolling window until new output
+            // evicts it, so scraped NeedsInput would re-pin AwaitingInput long
+            // after the prompt was resolved (acceptance AwaitingInput-stuck fix).
+            | (_, Observed::NeedsInput)
+            // Only a hook Stop resolves a pending dialog: a quiescent tick while a
+            // dialog the pattern table does not recognize is on screen must not
+            // flip AwaitingInput→Idle while the user is still being asked.
+            | (Some(AgentStatus::AwaitingInput), Observed::Ready)
     );
     if suppressed {
         return;
@@ -1246,6 +1262,187 @@ mod tests {
             vec![AgentStatus::Running],
             "scraped Working from AwaitingInput must still drive →Running (no hook \
              fires on permission approval); got {statuses:?}"
+        );
+    }
+
+    // ── M3 ACCEPTANCE FIX (AwaitingInput resolution): a resolved permission prompt
+    //    must end at Idle, driven by the hook Stop — not pinned by stale dialog text ──
+    //
+    // The acceptance defect (11.3 follow-up, observed live): after the user approves
+    // a permission prompt, the dialog text lingers in the 8KB rolling window until
+    // enough new output evicts it. detect_status checks awaiting_input patterns
+    // FIRST, so scraping keeps observing NeedsInput → `(Running, NeedsInput) →
+    // AwaitingInput` re-pins the state even while the agent works, and after the
+    // hook Stop fires the lingering pattern drags the session straight back to
+    // AwaitingInput. The badge appears stuck at "Awaiting input" forever.
+    //
+    // Fix: when hooks are active, scraped NeedsInput is suppressed EVERYWHERE (the
+    // hook Permission event owns entering AwaitingInput) and scraped Ready is
+    // suppressed from AwaitingInput (only the hook Stop may resolve a dialog —
+    // protects dialogs the patterns do not recognize). The hook path is never
+    // gated, and `(AwaitingInput, Working)` stays open for the approval-resume leg.
+
+    #[test]
+    fn hook_gate_scraped_needs_input_is_suppressed_when_hooks_active() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session is Running — the user approved and the agent resumed, but the
+        // dialog text still lingers in the rolling window.
+        let (sessions, id) = registry_with(AgentStatus::Running);
+        let runner = ClaudeCodeRunner::new();
+
+        let lingering_dialog = OutputSignal {
+            text_window: "Doyouwanttoproceed?\r\r\n❯1.Yes\r\r\n2.No".to_string(),
+            is_active: true,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 0,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &lingering_dialog,
+            true, // hooks_active → hook Permission owns entering AwaitingInput
+            &mut |sc| emitted.push(sc),
+        );
+
+        assert!(
+            emitted.is_empty(),
+            "with hooks_active=true, scraped NeedsInput must be suppressed (stale \
+             dialog text in the window must not re-pin AwaitingInput); got {:?}",
+            emitted.iter().map(|sc| sc.status).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sessions.get(&id).expect("present").status,
+            AgentStatus::Running,
+            "session must remain Running despite lingering dialog text"
+        );
+    }
+
+    #[test]
+    fn hook_gate_scraped_ready_does_not_resolve_awaiting_input() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // Session is AwaitingInput — a dialog the patterns do NOT recognize is on
+        // screen and the PTY is quiescent (no redraw this tick).
+        let (sessions, id) = registry_with(AgentStatus::AwaitingInput);
+        let runner = ClaudeCodeRunner::new();
+
+        let quiescent_unknown_dialog = OutputSignal {
+            text_window: "some dialog the pattern table does not know".to_string(),
+            is_active: false,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 400,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &quiescent_unknown_dialog,
+            true, // hooks_active → only a hook Stop may resolve a pending dialog
+            &mut |sc| emitted.push(sc),
+        );
+
+        assert!(
+            emitted.is_empty(),
+            "with hooks_active=true, scraped Ready from AwaitingInput must be \
+             suppressed (a quiet unknown dialog is still pending); got {:?}",
+            emitted.iter().map(|sc| sc.status).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sessions.get(&id).expect("present").status,
+            AgentStatus::AwaitingInput,
+            "session must remain AwaitingInput until a hook event resolves it"
+        );
+    }
+
+    #[test]
+    fn hook_stop_resolves_awaiting_input_to_idle() {
+        // The authoritative resolution: the turn ends (hook Stop → Ready) while the
+        // session is still AwaitingInput → Idle via the hook path (never gated).
+        let (sessions, id) = registry_with(AgentStatus::AwaitingInput);
+        let runner = ScriptedRunner::new(vec![None, None]);
+        let clock = FakeClock::at(0);
+
+        let tmp = std::env::temp_dir();
+        let state_path = tmp.join("spectty-test-session-awres.state");
+        std::fs::write(
+            &state_path,
+            r#"{"event":"Stop","ts":1,"session_id":"test-session-awres"}"#,
+        )
+        .unwrap();
+
+        let runtime_dir = tmp.to_string_lossy().into_owned();
+        let mut hook_reader = StateFileReader::new(&runtime_dir, "test-session-awres");
+
+        let (tx, rx) = signal_channel(SIGNAL_CHANNEL_CAP);
+        signal_try_send(&tx, vec![]); // one Ingest tick → hook polled
+        drop(tx);
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        run_signal_loop(
+            &rx,
+            &runner,
+            &sessions,
+            &id,
+            &clock,
+            &mut hook_reader,
+            true,
+            || 0,
+            |sc| emitted.push(sc),
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert!(
+            statuses.contains(&AgentStatus::Idle),
+            "hook Stop from AwaitingInput must emit Idle (turn over); got {statuses:?}"
+        );
+    }
+
+    #[test]
+    fn no_hooks_scraped_needs_input_still_drives_running_to_awaiting() {
+        use spectty_adapters::ClaudeCodeRunner;
+        use spectty_core::ports::clock::Timestamp;
+
+        // M2 stopgap (no hooks): the pattern fast-path is the ONLY permission
+        // detector and must stay fully open.
+        let (sessions, id) = registry_with(AgentStatus::Running);
+        let runner = ClaudeCodeRunner::new();
+
+        let dialog = OutputSignal {
+            text_window: "Doyouwanttoproceed?\r\r\n❯1.Yes".to_string(),
+            is_active: true,
+            exit_code: None,
+            last_byte_at: Timestamp(0),
+            idle_ms: 0,
+        };
+
+        let mut emitted: Vec<StatusChanged> = Vec::new();
+        emit_scraping_guarded(
+            &runner,
+            &sessions,
+            &id,
+            &dialog,
+            false, // no hooks → M2 stopgap untouched
+            &mut |sc| emitted.push(sc),
+        );
+
+        let statuses: Vec<AgentStatus> = emitted.iter().map(|sc| sc.status).collect();
+        assert_eq!(
+            statuses,
+            vec![AgentStatus::AwaitingInput],
+            "M2 stopgap: with hooks_active=false, scraped NeedsInput must drive \
+             Running→AwaitingInput; got {statuses:?}"
         );
     }
 

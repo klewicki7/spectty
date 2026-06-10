@@ -74,7 +74,14 @@ pub fn transition(current: AgentStatus, observed: Observed) -> AgentStatus {
         // reached a prompt (i.e., it IS idle). Both paths converge correctly.
         (Running, Ready) => Idle,
         (AwaitingInput, Working) => Running,
-        (AwaitingInput, Ready) => Running, // input consumed, output resumed
+        // M3 acceptance fix (criterion 11.3 follow-up): `Ready` means QUIET-AT-PROMPT.
+        // From AwaitingInput it fires when the pending prompt is resolved and the agent
+        // reached its prompt — the hook `Stop` path (turn ended while a dialog was
+        // believed pending) or a quiescent PTY with no dialog text on screen. Both mean
+        // the turn is OVER → Idle. The old `=> Running // input consumed, output
+        // resumed` reading was wrong for a quiescent signal: resumption is observed as
+        // `Working` (the row above), never as `Ready`.
+        (AwaitingInput, Ready) => Idle,
         // No legal change → no event. This covers every illegal jump, including
         // `(Starting, Finished)`, `(Starting, NeedsInput)`, `(Idle, NeedsInput)`, and
         // `(AwaitingInput, Finished)` — none are spec-enumerated edges.
@@ -107,6 +114,19 @@ mod tests {
         assert_eq!(awaiting, AgentStatus::AwaitingInput);
         let back = transition(AgentStatus::AwaitingInput, Observed::Working);
         assert_eq!(back, AgentStatus::Running);
+    }
+
+    #[test]
+    fn transition_awaiting_input_ready_reaches_idle() {
+        // M3 acceptance fix — intentional in BOTH modes:
+        // hook path — Stop fired while a dialog was believed pending → turn over;
+        // no-hooks path — detect_status checks dialog patterns BEFORE quiescence,
+        // so Ready only fires once the dialog text left the window, i.e. the
+        // prompt visibly resolved. Either way the agent is quiet at its prompt.
+        assert_eq!(
+            transition(AgentStatus::AwaitingInput, Observed::Ready),
+            AgentStatus::Idle
+        );
     }
 
     #[test]
@@ -272,9 +292,13 @@ mod tests {
             ((Running, NeedsInput), AwaitingInput),
             ((Running, Finished), Completed),
             ((Running, Failed), Error),
-            // AwaitingInput row. Spec: `AwaitingInput → Running` (after input). A `Finished`
-            // here is NOT spec-enumerated → NO-OP (AwaitingInput), not Completed.
-            ((AwaitingInput, Ready), Running),
+            // AwaitingInput row. Spec: `AwaitingInput → Running` (after input, via
+            // Working). M3 acceptance fix: `Ready` means QUIET-AT-PROMPT — when the
+            // pending prompt is resolved and the agent reaches its prompt (a hook Stop
+            // fired, or the PTY went quiescent with no dialog text), the turn is over
+            // → Idle, not Running. A `Finished` here is NOT spec-enumerated → NO-OP
+            // (AwaitingInput), not Completed.
+            ((AwaitingInput, Ready), Idle),
             ((AwaitingInput, Working), Running),
             ((AwaitingInput, NeedsInput), AwaitingInput),
             ((AwaitingInput, Finished), AwaitingInput),
