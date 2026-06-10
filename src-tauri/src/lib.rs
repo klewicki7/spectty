@@ -178,6 +178,20 @@ fn home_claude_json() -> String {
         .unwrap_or_else(|_| ".claude.json".to_string())
 }
 
+/// Resolve the home directory for the settings provisioner's Global scope path.
+///
+/// The settings provisioner builds `{home}/.claude/settings.json` for Global scope.
+/// This MUST be the resolved `$HOME` value — NOT the literal `~` — to avoid EROFS
+/// on macOS's sealed read-only root when the app is launched via Finder (cwd = `/`).
+/// Mirrors `home_claude_json()` at the composition root (same resolution pattern).
+///
+/// Falls back to `.` when `$HOME` is unset so the path degrades to
+/// `./.claude/settings.json` rather than crashing. In practice, `$HOME` is always
+/// set on macOS/Linux for GUI apps launched via Finder or launchd.
+fn home_settings_json() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+}
+
 /// Build and run the Tauri application.
 ///
 /// Split out of `main.rs` so the same entrypoint can later be reused for the
@@ -200,9 +214,10 @@ pub fn run() {
     ));
 
     // The hooks provisioner injects the Spectty hook entries into
-    // `~/.claude/settings.json` (Global) / `.claude/settings.json` (Project). The
-    // production event list is built by `production_hook_events()` — see its doc comment
-    // and the associated unit test for the authoritative list and rationale.
+    // `{home}/.claude/settings.json` (Global) / `.claude/settings.json` (Project).
+    // `home_settings_json()` resolves `$HOME` at startup — NOT the literal `~` — to
+    // avoid EROFS on macOS's sealed root (Finder launch cwd = `/`).
+    // Production event list built by `production_hook_events()` — see its doc comment.
     //
     // Managed as `HooksProvisionerState` (distinct Tauri state type) so it does not
     // collide with `Arc<dyn ProvisioningPort>` (D21).
@@ -210,6 +225,7 @@ pub fn run() {
     let hooks_events = production_hook_events(&hook_cmd);
     let hooks_provisioner: Arc<dyn ProvisioningPort> = Arc::new(ClaudeSettingsProvisioner::new(
         RealConfigFile,
+        home_settings_json(),
         hook_cmd,
         hooks_events,
     ));
