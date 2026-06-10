@@ -43,6 +43,14 @@ impl ConfigFile for RealConfigFile {
     }
 
     fn write_atomic(&self, path: &str, contents: &str) -> std::io::Result<()> {
+        // Ensure the parent directory exists (e.g. workspace without .claude/).
+        // A path with no parent component is a no-op edge case — skip safely.
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
         // One-time backup of the ORIGINAL before we ever mutate it.
         let backup = format!("{path}{BACKUP_SUFFIX}");
         if !std::path::Path::new(&backup).exists() {
@@ -177,5 +185,34 @@ mod tests {
     fn read_absent_file_is_none() {
         let fake = FakeConfigFile::default();
         assert_eq!(fake.read("/nope").expect("read"), None);
+    }
+
+    /// RED → GREEN: `RealConfigFile::write_atomic` must create missing parent
+    /// directories so a workspace without `.claude/` does not fail with ENOENT
+    /// (acceptance 11.1 critical).
+    #[test]
+    fn write_atomic_creates_missing_parent_dirs() {
+        // Build a unique nested path whose parent directories do NOT exist yet.
+        let unique = format!(
+            "spectty-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let path = base.join("nested").join("dir").join("settings.json");
+        let path_str = path.to_str().expect("valid utf8");
+
+        let real = RealConfigFile;
+        real.write_atomic(path_str, r#"{"hooks":{}}"#)
+            .expect("write_atomic must succeed even when parent is absent");
+
+        let contents = std::fs::read_to_string(&path).expect("file must exist after write");
+        assert_eq!(contents, r#"{"hooks":{}}"#, "content round-trips");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
