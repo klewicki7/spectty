@@ -177,4 +177,5 @@ describe("App — session routing", () => {
     // Each spawn must use a different channel instance
     expect(firstChannel).not.toBe(secondChannel);
   });
+
 });
