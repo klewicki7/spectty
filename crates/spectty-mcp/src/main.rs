@@ -342,17 +342,25 @@ fn spectty_approval_effect(
     }
 }
 
+/// How many CONSECUTIVE transient `get` failures the long-poll tolerates before surfacing the
+/// error (PR-3 Finding 4). A single blip — e.g. the 2 s client timeout firing once under load —
+/// must NOT abort an otherwise-healthy poll; only a sustained outage does. The counter resets
+/// on any successful read, so isolated blips never accumulate across the whole budget.
+const APPROVAL_MAX_CONSECUTIVE_GET_FAILURES: u32 = 3;
+
 /// Poll `topic_key` up to `max_polls` times (sleeping `interval` between attempts) for the
 /// stored approval document's `resolution` to become a non-null decision matching
 /// `action_id`. Returns:
 /// - `Ok(Some(decision))` once a resolution is observed (the canonical Core `ApprovalState`
 ///   string the app wrote, e.g. `"Approved"`);
 /// - `Ok(None)` if the budget elapses with no resolution (bounded — never hangs);
-/// - `Err` on a transport failure.
+/// - `Err` only after [`APPROVAL_MAX_CONSECUTIVE_GET_FAILURES`] CONSECUTIVE transport failures
+///   (a single transient blip is tolerated and retried within the same `max_polls` budget).
 ///
 /// PURE over the [`EngramClient`] seam: tests pass a fake that resolves on the first read and
 /// a zero `interval`, so no real wall-clock time is consumed and the loop logic is exercised
-/// directly.
+/// directly. `max_polls` stays the authoritative total bound — tolerated retries are spent
+/// from the SAME budget, they never extend it.
 fn poll_for_resolution(
     engram: &dyn EngramClient,
     topic_key: &str,
@@ -360,10 +368,26 @@ fn poll_for_resolution(
     max_polls: u32,
     interval: Duration,
 ) -> Result<Option<String>, EngramClientError> {
+    // Count consecutive transport failures so one blip does not abort the whole poll; reset to
+    // zero on any successful read so only a SUSTAINED outage surfaces (PR-3 Finding 4).
+    let mut consecutive_failures: u32 = 0;
     for attempt in 0..max_polls {
-        if let Some(content) = engram.get(topic_key)? {
-            if let Some(decision) = resolution_of(&content, action_id) {
-                return Ok(Some(decision));
+        match engram.get(topic_key) {
+            Ok(maybe_content) => {
+                consecutive_failures = 0;
+                if let Some(content) = maybe_content {
+                    if let Some(decision) = resolution_of(&content, action_id) {
+                        return Ok(Some(decision));
+                    }
+                }
+            }
+            Err(err) => {
+                consecutive_failures += 1;
+                // Only give up once a SUSTAINED outage exceeds the tolerance — a transient blip
+                // is absorbed and retried (still within the `max_polls` total bound).
+                if consecutive_failures >= APPROVAL_MAX_CONSECUTIVE_GET_FAILURES {
+                    return Err(err);
+                }
             }
         }
         // Sleep BETWEEN attempts, not after the last one (which would waste an interval).
@@ -1088,6 +1112,141 @@ mod tests {
                 doc.to_string()
             }))
         }
+    }
+
+    /// PR-3 Finding 4: an [`EngramClient`] whose `get` fails (transport) a fixed number of
+    /// times, then returns a RESOLVED document. Models a transient blip (e.g. the 2s client
+    /// timeout firing once) inside an otherwise-healthy long-poll. `upsert` always succeeds so
+    /// the pending registration lands.
+    struct FlakyGetEngramClient {
+        store: Mutex<HashMap<String, String>>,
+        decision: String,
+        remaining_failures: Mutex<u32>,
+    }
+
+    impl FlakyGetEngramClient {
+        fn new(fail_times: u32, decision: &str) -> Self {
+            Self {
+                store: Mutex::new(HashMap::new()),
+                decision: decision.to_string(),
+                remaining_failures: Mutex::new(fail_times),
+            }
+        }
+    }
+
+    impl EngramClient for FlakyGetEngramClient {
+        fn upsert(&self, topic_key: &str, content: &str) -> Result<(), EngramClientError> {
+            self.store
+                .lock()
+                .unwrap()
+                .insert(topic_key.to_string(), content.to_string());
+            Ok(())
+        }
+
+        fn get(&self, topic_key: &str) -> Result<Option<String>, EngramClientError> {
+            {
+                let mut left = self.remaining_failures.lock().unwrap();
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(EngramClientError::Transport(
+                        "fake: transient blip".to_string(),
+                    ));
+                }
+            }
+            let pending = self.store.lock().unwrap().get(topic_key).cloned();
+            Ok(pending.map(|content| {
+                let mut doc: Value = serde_json::from_str(&content).expect("stored doc is JSON");
+                doc["resolution"] = json!(self.decision);
+                doc.to_string()
+            }))
+        }
+    }
+
+    /// PR-3 Finding 4: a couple of transient `get` failures inside the budget must NOT abort
+    /// the long-poll. With a tolerance of N consecutive failures, two blips then a resolution
+    /// still resolves the approval (the counter resets on the eventual success).
+    #[test]
+    fn spectty_approval_tolerates_transient_get_failures_then_resolves() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "10");
+        // Fail twice (< the tolerance of 3), then resolve.
+        let engram = FlakyGetEngramClient::new(2, "Approved");
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+
+        assert!(resp.get("error").is_none());
+        assert_eq!(
+            resp["result"]["isError"], false,
+            "transient blips inside tolerance must not abort the poll"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Approved"),
+            "the approval still resolves after transient blips: {text}"
+        );
+    }
+
+    /// PR-3 Finding 4: N+ CONSECUTIVE transient failures surface the engram-unavailable error
+    /// (the poll gives up only after the tolerance is exhausted, not on the first blip).
+    #[test]
+    fn spectty_approval_surfaces_error_after_consecutive_get_failures() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "10");
+        // Fail more than the tolerance (3) consecutively → never resolves, surfaces error.
+        let engram = FlakyGetEngramClient::new(50, "Approved");
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+
+        assert!(resp.get("error").is_none());
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "consecutive failures beyond tolerance must surface the transport error"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("engram unavailable"),
+            "exhausted tolerance reports engram unavailable: {text}"
+        );
+    }
+
+    /// PR-3 Finding 4 (unit): `poll_for_resolution` tolerates transient failures up to the
+    /// limit and resets the counter on a successful read. Driven directly over the seam.
+    #[test]
+    fn poll_for_resolution_resets_failure_counter_on_success() {
+        // Fails twice (within tolerance 3), then resolves → Ok(Some).
+        let engram = FlakyGetEngramClient::new(2, "Approved");
+        engram
+            .upsert(
+                "spectty/42/approval",
+                r#"{"action_id":"edit-1","options":[],"resolution":null}"#,
+            )
+            .unwrap();
+        let got = poll_for_resolution(&engram, "spectty/42/approval", "edit-1", 10, Duration::ZERO);
+        assert_eq!(got.unwrap().as_deref(), Some("Approved"));
+
+        // Fails beyond tolerance consecutively → Err surfaces (poll aborts).
+        let down = FlakyGetEngramClient::new(50, "Approved");
+        down.upsert(
+            "spectty/42/approval",
+            r#"{"action_id":"edit-1","options":[],"resolution":null}"#,
+        )
+        .unwrap();
+        let err = poll_for_resolution(&down, "spectty/42/approval", "edit-1", 10, Duration::ZERO);
+        assert!(matches!(err, Err(EngramClientError::Transport(_))));
     }
 
     /// WU-5.1: a `spectty_approval` call registers EXACTLY ONE pending request keyed
