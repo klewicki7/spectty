@@ -528,6 +528,8 @@ mod tests {
             status,
             title: "t".to_string(),
             created_at: Timestamp(0),
+            last_diff: None,
+            last_diff_hash: None,
         });
         (registry, id)
     }

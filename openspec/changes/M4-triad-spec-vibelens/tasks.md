@@ -428,25 +428,25 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > `FileChanged` batches. Zero new Core deps. Hash = `std::collections::hash_map::DefaultHasher`
 > over the diff string (std only).
 
-- [ ] 6.1 RED: `diff_explanation_empty_is_well_formed` — `DiffExplanation::empty()` → empty
+- [x] 6.1 RED: `diff_explanation_empty_is_well_formed` — `DiffExplanation::empty()` → empty
   `files`, empty `summary`; serde round-trips. `[M4-REQ-12]` `[unit][D34]`
-- [ ] 6.2 RED: `session_update_diff_stores_hash` — `Session::update_diff(expl, hash)` sets
+- [x] 6.2 RED: `session_update_diff_stores_hash` — `Session::update_diff(expl, hash)` sets
   `last_diff` + `last_diff_hash`; same-hash detection is observable on the aggregate. `[M4-REQ-13]`
   `[unit][D34]`
-- [ ] 6.3 RED: `core_ports_are_object_safe_and_sync` — compile-time: `fn _g(_: &dyn GitPort){}`,
+- [x] 6.3 RED: `core_ports_are_object_safe_and_sync` — compile-time: `fn _g(_: &dyn GitPort){}`,
   `fn _e(_: &dyn DiffExplainerPort){}`, `fn _w(_: &dyn FileWatchPort){}` — confirms SYNC,
   `Send + Sync`, object-safe, no `async-trait`. `[M4-REQ-12]` `[unit][ci][D35]`
-- [ ] 6.4 GREEN: create `crates/core/src/entities/diff.rs` — `struct DiffExplanation { files:
+- [x] 6.4 GREEN: create `crates/core/src/entities/diff.rs` — `struct DiffExplanation { files:
   Vec<FileExplanation>, summary: String }` + `struct FileExplanation { path: String, rationale:
   String }` + `fn empty() -> Self`. `serde + thiserror`. `[M4-REQ-12]` `[unit][D34]`
-- [ ] 6.5 GREEN: modify `crates/core/src/entities/session.rs` — add `last_diff:
+- [x] 6.5 GREEN: modify `crates/core/src/entities/session.rs` — add `last_diff:
   Option<DiffExplanation>`, `last_diff_hash: Option<u64>`, `fn update_diff(&mut self, expl:
   DiffExplanation, hash: u64)`. `[M4-REQ-13]` `[unit][D34]`
-- [ ] 6.6 GREEN: create `crates/core/src/ports/git.rs` (`GitPort::diff_head` + `enum GitError`),
+- [x] 6.6 GREEN: create `crates/core/src/ports/git.rs` (`GitPort::diff_head` + `enum GitError`),
   `crates/core/src/ports/file_watch.rs` (`FileWatchPort`), `crates/core/src/ports/diff_explainer.rs`
   (`DiffExplainerPort::explain` + `enum ExplainError`). ALL SYNC. Export from
   `crates/core/src/ports/mod.rs`. `[M4-REQ-12]` `[unit][ci][D35]`
-- [ ] **Gate (WU-6)**: `cargo test --workspace` green (3 pure tests); fmt/clippy clean;
+- [x] **Gate (WU-6)**: `cargo test --workspace` green (3 pure tests); fmt/clippy clean;
   `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok` (Core gained ONLY
   serde+thiserror types/traits, NO `async-trait`/`notify`/`git2` — M4-REQ-12/ci). **Load-bearing
   Core-quarantine WU.**
@@ -465,24 +465,24 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > empty-repo by diffing against the empty tree. `NotifyFileWatcher` yields debounced (500ms–1s)
 > `FileChanged` batches. Async bridged adapter-side (sync port signature per Tasks-phase check).
 
-- [ ] 7.1 RED: `git_adapter_diff_head_on_populated_repo` — temp git repo with a staged change →
+- [x] 7.1 RED: `git_adapter_diff_head_on_populated_repo` — temp git repo with a staged change →
   `diff_head` returns the unified diff. `[M4-REQ-12]` `[unit][D35]`
-- [ ] 7.2 RED: `git_adapter_diff_head_empty_repo_uses_empty_tree` — temp repo with NO commits →
+- [x] 7.2 RED: `git_adapter_diff_head_empty_repo_uses_empty_tree` — temp repo with NO commits →
   `diff_head` diffs against the empty tree (no error, returns the add-all diff). `[M4-REQ-13]`
   `[unit][D35]`
-- [ ] 7.3 RED: `git_adapter_truly_empty_workspace_returns_empty_string` — empty working tree, no
+- [x] 7.3 RED: `git_adapter_truly_empty_workspace_returns_empty_string` — empty working tree, no
   changes → empty diff string (pipeline maps this to `DiffExplanation::empty()` in WU-8).
   `[M4-REQ-13]` `[unit][D35]`
-- [ ] 7.4 RED: `notify_file_watcher_debounces_burst_into_one_batch` — fake/synthetic event burst
+- [x] 7.4 RED: `notify_file_watcher_debounces_burst_into_one_batch` — fake/synthetic event burst
   → ONE debounced `FileChanged` batch within the window. `[M4-REQ-15]` `[unit][D35]`
-- [ ] 7.5 GREEN: create `crates/adapters/src/git/mod.rs` — `Git2Adapter` impl `GitPort`
-  (git2 or `std::process::Command` git), empty-repo handling. Add `git2` (or none if shell) to
-  ADAPTERS Cargo.toml only. `[M4-REQ-12]` `[unit][D35]`
-- [ ] 7.6 GREEN: create `crates/adapters/src/file_watch/mod.rs` — `NotifyFileWatcher` impl
-  `FileWatchPort` (notify, debounced). Add `notify` to ADAPTERS Cargo.toml only. `[M4-REQ-15]`
-  `[unit][D35]`
-- [ ] **Gate (WU-7)**: `cargo test --workspace` green (4 adapter tests); fmt/clippy clean;
-  `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok` (git2/notify in
+- [x] 7.5 GREEN: create `crates/adapters/src/git/mod.rs` — `GitCliAdapter` impl `GitPort`
+  (shell-git via `std::process::Command`; chosen over git2 — see file rationale), empty-repo
+  handling via empty-tree object. NO new crate dep for git. `[M4-REQ-12]` `[unit][D35]`
+- [x] 7.6 GREEN: create `crates/adapters/src/file_watch/mod.rs` — `NotifyFileWatcher` impl
+  `FileWatchPort` (notify, debounced via pure `Debouncer`). Added `notify` to ADAPTERS Cargo.toml
+  + workspace deps only. `[M4-REQ-15]` `[unit][D35]`
+- [x] **Gate (WU-7)**: `cargo test --workspace` green (7 adapter tests); fmt/clippy clean;
+  `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok` (git/notify in
   adapters, NOT Core).
 
 ---
@@ -503,6 +503,10 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > emit `diff_updated`. Cooperative `spectty_diff` bypasses debounce; FileWatch is the generic
 > fallback (`emits_diff_signals==false`). Shared in-flight guard; hash-dedup makes double-fire safe.
 
+- [ ] 8.0 **(PR-4 review carry-in)** Before wiring `NotifyFileWatcher` into the pipeline, EXCLUDE
+  `.git/` from the watch-trigger set (filter batch paths under `.git/`; ideally honor `.gitignore`).
+  Without it the pipeline self-triggers: diff → git churns `.git/index` → file event → re-diff.
+  Hash-dedup blunts the explain cost but the watcher still wakes per internal git write. `[D35][D37]`
 - [ ] 8.1 RED: `vibelens_adapter_parses_show_diff_explanation_response` — fake stdio child scripted
   with a JSON-RPC `show_diff_explanation` response → parsed into `DiffExplanation { files, summary }`.
   `[M4-REQ-12]` `[unit][D36]`
@@ -556,16 +560,19 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > per-file analysis). The `DiffExplainerPort` + `VibeLensMcpAdapter` isolate this — pin the
 > field names + response shape here BEFORE un-ignoring the real test.
 
-- [ ] 9.1 Run `tools/list` against `npx -y vibelens-mcp` (stdio JSON-RPC). Confirm the
-  `show_diff_explanation` input schema — exact param field names (`diff`, `file_analysis`?) and
-  types. `[M4-REQ-12]` `[manual]`
-- [ ] 9.2 Confirm the response shape (how `files[]` + `summary` map back to `DiffExplanation`).
-  `[M4-REQ-12]` `[manual]`
-- [ ] 9.3 Record findings in `design.md` §Pre-Apply Gates G2 (check the box); adjust the
-  `VibeLensMcpAdapter` request/parse code (WU-8.8) + un-ignore 8.11 if shapes confirmed. `[ci]`
-- [ ] **Gate (WU-9)**: G2 findings documented; adapter request/parse pinned. No build/test gate.
-  If VibeLens is unreachable, mark G2 deferred and keep WU-8.11 `#[ignore]` — slice ships green
-  on the fake stdio child.
+- [x] 9.1 Run `tools/list` against `npx -y vibelens-mcp` (stdio JSON-RPC). VERIFIED 2026-06-11
+  (v0.1.0): `show_diff_explanation` inputSchema requires `title`(string) + `diff`(string); optional
+  `summary`, `annotations:[{file,explanation,line?,actions?}]`, `editor`, `workspacePath`. NO
+  `file_analysis` param — per-file rationale is `annotations`. `[M4-REQ-12]` `[manual]`
+- [x] 9.2 Confirm the response shape. VERIFIED: the tool is a side-effecting WRITE; response is
+  `content[0].text` = `{ok, reviewId, syncId, deduped}`, NOT a `DiffExplanation`. The pipeline
+  must BUILD the `DiffExplanation` and PUSH it (adapter = display SINK, not SOURCE — PR-5 impact
+  recorded in design.md G2). `[M4-REQ-12]` `[manual]`
+- [x] 9.3 Recorded findings in `design.md` §Pre-Apply Gates G2 (box checked) + amended D36. The
+  WU-8.8 request/parse + WU-8.11 real test are pinned for PR-5 (WU-8.11 stays `#[ignore]`, asserts
+  the WRITE envelope). `[ci]`
+- [x] **Gate (WU-9)**: G2 findings documented; adapter request/parse contract pinned for PR-5.
+  No build/test gate. VibeLens WAS reachable — G2 fully VERIFIED (not deferred).
 
 ---
 

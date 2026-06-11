@@ -24,3 +24,6 @@ anyhow = "1"
 # Tokio runtime, D26). Core NEVER gains these — the hexagonal quarantine stays green.
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# M4 (PR-4, D35): the file-system watcher behind `FileWatchPort` lives in ADAPTERS only.
+# Core NEVER gains `notify` — the hexagonal quarantine (`cargo deny check bans`) stays green.
+notify = "6"

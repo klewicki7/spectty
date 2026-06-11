@@ -17,11 +17,13 @@ pub mod ports;
 
 pub use entities::{
     transition, AgentCapabilities, AgentDescriptor, AgentKind, AgentSpec, AgentStatus, AgentTier,
-    ApprovalState, CostDelta, Observed, OutputSignal, QuickAction, Session, SessionId,
-    SessionRegistry, SessionSummary, SpecContract, SpecError, SpecTask, TaskProgress, TaskState,
-    Workspace, WorkspaceId,
+    ApprovalState, CostDelta, DiffExplanation, FileExplanation, Observed, OutputSignal,
+    QuickAction, Session, SessionId, SessionRegistry, SessionSummary, SpecContract, SpecError,
+    SpecTask, TaskProgress, TaskState, Workspace, WorkspaceId,
 };
 pub use ports::{
-    AgentRunner, ClockPort, LaunchContext, LaunchSpec, PersistenceError, PersistencePort,
-    ProvisioningError, ProvisioningHandle, ProvisioningPort, ProvisioningScope, Timestamp,
+    AgentRunner, ClockPort, DiffExplainerPort, ExplainError, FileChangeCallback, FileChanged,
+    FileWatchError, FileWatchPort, GitError, GitPort, LaunchContext, LaunchSpec, PersistenceError,
+    PersistencePort, ProvisioningError, ProvisioningHandle, ProvisioningPort, ProvisioningScope,
+    Timestamp, WatchGuard,
 };

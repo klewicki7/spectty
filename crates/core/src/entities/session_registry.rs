@@ -125,6 +125,8 @@ mod tests {
             status,
             title: "Fix the auth bug".to_string(),
             created_at: Timestamp(1_700_000),
+            last_diff: None,
+            last_diff_hash: None,
         }
     }
 

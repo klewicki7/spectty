@@ -73,7 +73,7 @@ The D32/D33 sketch typed `transition(self, to) -> Result<TaskState, SpecError>`,
 ### D36 — VibeLens transport: stdio subprocess (VERIFIED), `McpAdapter` owns the child
 **Choice**: `DiffExplainerPort` impl `VibeLensMcpAdapter` spawns `npx -y vibelens-mcp` as a stdio child (newline-delimited JSON-RPC 2.0 — same framing as `spectty-mcp`), calls `show_diff_explanation { diff, file_analysis }`, parses the response into `DiffExplanation`. Manages subprocess lifecycle (spawn lazily on first explain, reuse, restart on crash).
 **Alternatives**: HTTP client (VibeLens has no HTTP server — `.mcp.json` proves stdio).
-**Rationale**: VERIFIED against `.mcp.json`. Param field names (`diff`, `file_analysis`) are illustrative — confirm via `tools/list` (Pre-Apply Gate G2).
+**Rationale**: VERIFIED against `.mcp.json`. **AMENDED by G2 (verified 2026-06-11) — see Pre-Apply Gate G2 below.** The real schema is `show_diff_explanation { title(req), diff(req), summary?, annotations:[{file,explanation,line?,actions?}]?, editor?, workspacePath? }`; there is NO `file_analysis` param (per-file rationale is `annotations`). Critically, the tool is a side-effecting WRITE that returns `{ok, reviewId, syncId, deduped}`, NOT a `DiffExplanation` — so in PR-5 the pipeline BUILDS the `DiffExplanation` and PUSHES it to VibeLens (adapter is a display SINK, not a SOURCE). The PR-4 Core `DiffExplanation` + port shapes are unaffected.
 
 ### D37 — Diff pipeline trigger arbitration: cooperative `spectty_diff` bypasses FileWatch debounce
 **Choice**: Pipeline = `(FileWatch debounced 500 ms–1 s) OR (spectty_diff signal)` → `GitPort::diff_head` → hash == `last_diff_hash`? skip : `DiffExplainerPort::explain` → `Session::update_diff` → emit `diff_updated`. The cooperative `spectty_diff` path fires immediately (no debounce wait); FileWatch is the generic fallback (`emits_diff_signals == false`). A shared "explain in flight" guard prevents the two triggers double-firing.
@@ -204,5 +204,30 @@ fix (Slice 1). Feature lands behind the existing per-session pipeline — no fla
     ensures the session via `POST /sessions` before each `POST /observations`.
   - Build stays green behind `FakeEngramHttp` regardless; the one real-`:7437` contract test is kept
     `#[ignore]` (daemon-dependent, not run in CI) per WU-1.8.
-- [ ] **G2 (blocks Slice 4 apply, R4)**: VERIFY `show_diff_explanation` param schema via `tools/list` against `npx -y vibelens-mcp` (transport already VERIFIED = stdio). Confirm field names (`diff`, `file_analysis`?) and response shape before un-ignoring the real-`npx` contract test. (DEFERRED to PR-4; not in PR-1 scope.)
+- [x] **G2 (blocks Slice 4 apply, R4) — VERIFIED 2026-06-11 via `tools/list` + a probe `tools/call` against `npx -y vibelens-mcp` v0.1.0 (stdio, protocol `2024-11-05`):**
+  - **Tool** `show_diff_explanation`. **`inputSchema` (object, `additionalProperties:false`)**:
+    - **`title`** (string, minLength 1) — **REQUIRED**.
+    - **`diff`** (string, minLength 1) — **REQUIRED**. Raw unified `git diff` text (NOT a path/command).
+    - `summary` (string) — optional high-level summary.
+    - `annotations` (array, optional) — per-file rationale: each item
+      `{ file: string(req), explanation: string(req), line?: int, actions?: [{label, prompt}] }`.
+    - `editor` (enum `"cursor"|"vscode"`, optional), `workspacePath` (string, optional).
+    - **CORRECTION to D36**: the sketched param `file_analysis` does NOT exist. Per-file rationale is
+      `annotations[]` with `{file, explanation}`. `title` is REQUIRED (the sketch omitted it).
+  - **Response shape (CRITICAL — overrides the D36 "parses → `DiffExplanation`" assumption)**:
+    `show_diff_explanation` is a **side-effecting WRITE tool**. It SAVES the diff + annotations to
+    VibeLens's local SQLite and returns an MCP `content[0].text` JSON envelope
+    `{"ok":true,"reviewId":<int>,"syncId":"<uuid>","deduped":<bool>}` — it does NOT return a
+    `DiffExplanation` (files+summary). **The explanation is the INPUT we send, not output we receive.**
+  - **PR-5 design impact (recorded here, implemented in PR-5)**: `DiffExplainerPort::explain(diff, ws)
+    -> Result<DiffExplanation, ExplainError>` cannot source the `DiffExplanation` content FROM VibeLens.
+    The pipeline must BUILD the `DiffExplanation` (summary + per-file rationale) itself — either by an
+    LLM/heuristic pass over the diff, or initially a deterministic per-file summary — then PUSH it to
+    VibeLens via `show_diff_explanation { title, diff, summary, annotations }` as a presentation
+    side-effect, and surface the SAME built `DiffExplanation` to the Tauri UI. `VibeLensMcpAdapter` in
+    PR-5 is therefore a SINK (display) rather than a SOURCE; the `DiffExplainerPort` trait stays the
+    abstraction seam so the explanation-builder is swappable. The PR-4 `DiffExplainerPort` + Core
+    `DiffExplanation` shapes are unaffected by this finding (both confirmed correct). The WU-8.11 real-
+    `npx` test stays `#[ignore]` and asserts the WRITE envelope (`ok`/`reviewId`), not a parsed
+    explanation. (G2 satisfied — schema + response pinned; PR-4 ships green.)
 - [x] **Tasks-phase check (RESOLVED)**: `async-trait` is NOT a Core dependency (`crates/core/Cargo.toml` runtime = `serde` + `thiserror` only). The new Git/DiffExplainer ports (PR-4) MUST use sync signatures (async bridged in adapters) to preserve R6 (no new Core dep). Confirmed in tasks.md.

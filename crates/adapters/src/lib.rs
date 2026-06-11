@@ -8,6 +8,8 @@
 
 pub mod agent;
 pub mod clock;
+pub mod file_watch;
+pub mod git;
 pub mod hook;
 pub mod persistence;
 pub mod provision;
@@ -15,6 +17,8 @@ pub mod pty;
 
 pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSignalProducer};
 pub use clock::SystemClock;
+pub use file_watch::{Debouncer, NotifyFileWatcher, NotifyWatchGuard};
+pub use git::GitCliAdapter;
 pub use hook::{
     event_to_observed, parse_state_file, HookEvent, HookState, StateFileReader,
     PERMISSION_PROMPT_MATCHER,
