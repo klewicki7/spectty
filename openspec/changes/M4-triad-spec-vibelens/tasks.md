@@ -110,10 +110,10 @@ WU-8 (VibeLensMcpAdapter stdio child + diff pipeline arbitration + spectty_diff)
 WU-9 (G2: verify show_diff_explanation schema) ─────────────────────────────────┘  (gate, before WU-8 real test)
               │
               ▼
-WU-10 (UI triad: ipc.ts + SpecPane + VibeLensPanel + TriadLayout + vitest) ──────┐  Slice 5 / PR-5
+WU-10 (UI triad: ipc.ts + SpecPane + VibeLensPanel + TriadLayout + vitest) ──────┐  UI triad slice / PR-6
               │
               ▼
-WU-11 (manual acceptance — 8 roadmap exit criteria + ADR D26-D38 note) ──────────┘  Slice 5 / PR-5 (verify/doc)
+WU-11 (manual acceptance — 8 roadmap exit criteria + ADR D26-D38 note) ──────────┘  UI triad slice / PR-6 (verify/doc)
 ```
 
 ---
@@ -577,7 +577,8 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 **Strict TDD**: RED vitest specs for each component/listener FIRST (mocked IPC). Test runner
 `pnpm -C ui test`. React 19 named imports; NO manual `useMemo`/`useCallback`; vitest mocks.
 **Rollback**: revert → backend events emit but no triad UI; existing panes unaffected.
-**PR slice**: PR-5 (Slice 5).
+**PR slice**: PR-6 (UI triad slice). Slice 4 was sub-split into PR-4 (WU-6/7/8/9) + PR-5 to
+stay within the 400-line review budget, so the UI triad lands as PR-6 (WU-10 + WU-11).
 
 > D29. Mirror the existing `ipc.ts` listener pattern (`listenStatusChanged/Created/Closed`).
 > Add `listenSpecUpdated`, `listenDiffUpdated`, `getSpec`, `getDiffExplanation`, `approvePrompt`.
@@ -612,6 +613,10 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
   `[M4-REQ-18][M4-REQ-19][M4-REQ-20][M4-REQ-21][M4-REQ-22]` `[unit]`
 - [ ] 10.10 GREEN: add minimal `spectty_status`/`spectty_cost` effect stubs in
   `crates/spectty-mcp/src/main.rs` (per design slice map; schema UNTOUCHED). `[M4-REQ-08]` `[unit][D16]`
+- [ ] 10.11 Poll loop watches `spectty/{sid}/approval` → emits `status_changed(AwaitingInput)` +
+  `quick_actions` from `options[]` (REQ-10 surfacing half; the resolver half shipped in PR-3/WU-5).
+  Reuses the EXISTING M2 status path — NO new approval event (D29). Consumes the pending-doc shape
+  PR-3 pinned at `spectty/{session_id}/approval`. `[M4-REQ-10]` `[unit][D29][D31]`
 - [ ] **Gate (WU-10)**: `pnpm -C ui test` green (all vitest specs) + `pnpm -C ui build` succeeds;
   `cargo test --workspace` green; fmt/clippy clean; `cargo deny ... check bans` → `bans ok`.
 
@@ -621,7 +626,7 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 **Commit**: `docs(m4): record M4 manual acceptance (8 exit criteria) + append ADR D26-D38 notes`
 **Depends on**: ALL prior WUs landed (full triad running). This is the `sdd-verify` pass/fail gate.
 **Rollback**: n/a (verification + doc artifact).
-**PR slice**: PR-5 (verify/doc, ~0 code lines; folds into Slice 5 PR or stands alone).
+**PR slice**: PR-6 (verify/doc, ~0 code lines; folds into the UI triad PR or stands alone).
 
 > Maps verbatim to the spec acceptance gate (M4-REQ-25) and the 8 roadmap exit criteria.
 > CANNOT be unit-tested. Run the real app on macOS (gating); generic-agent degradation path
