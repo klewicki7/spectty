@@ -1,6 +1,10 @@
 # M3 — Hook-Based Status Detection — Manual Acceptance Checklist
 
-> **Status: PENDING — awaiting manual run. Results to be recorded for sdd-verify.**
+> **Status: PASS — manual run executed 2026-06-10 (KL) on macOS (aarch64), Claude Code
+> v2.1.172, packaged debug bundle. All gating criteria 11.1–11.5 PASS; 11.6 SKIP (no
+> Windows host). Three defects found and fixed during the run: PR #30 (Working-bounce),
+> PR #31 (whitespace-insensitive patterns), PR #32 (AwaitingInput resolution). See the
+> per-criterion result lines and the acceptance-gate section.**
 >
 > SDD apply phase, WU-11 (PR-5, the final M3 slice). Consumes
 > `sdd/M3-hook-status-detection/tasks` (obs #831) + `design` (obs #829).
@@ -75,7 +79,10 @@
 - `session_runtime.rs` unit tests on `run_signal_loop_hook_stop_from_running_emits_idle` and
   `run_signal_loop_hook_does_not_double_emit_when_same_tick_scrape_agrees`.
 
-**Result: ☐ PASS / ☐ FAIL — date/initials:**
+**Result: ☑ PASS — 2026-06-10 / KL.** Badge `Idle` at prompt → `Running` on submit (hook
+`Submit`) → `Idle` ~200 ms after the turn ends (hook `Stop`), no scraping dependence.
+Required PR #30 (gate suppresses scraped `Working` from `Idle`/`Starting` — Claude's TUI
+redraws at the idle prompt and bounced the hook-sourced `Idle` back to `Running`).
 
 ---
 
@@ -119,7 +126,13 @@
   synthetic `FakeConfigFile` fixtures. Confirm scope resolution and the pretty-printed
   shape against the real file.
 
-**Result: ☐ PASS / ☐ FAIL — date/initials:**
+**Result: ☑ PASS — 2026-06-10 / KL.** All four managed hook rows present (`UserPromptSubmit`,
+`Stop`, `Notification` matcher=`permission_prompt`, `SessionEnd`) pointing at the bundle's
+`Contents/MacOS/spectty-hook` with exec-form `args` (confirmed valid against the official
+Claude Code hooks schema). Foreign keys intact: user-authored `gentle-ai` UserPromptSubmit
+hook, `permissions.allow` (69 entries), `attribution`. Spectty rows live ONLY in
+`settings.json` `hooks`; the `spectty` row in `~/.claude.json` `mcpServers` belongs to the
+M2 MCP provisioner and is present only while a session is live.
 
 ---
 
@@ -168,9 +181,16 @@ regression. See design §3.4 deviation note and the deferred items section below
   `crates/adapters/src/hook/state.rs` (one-line DATA edit) and add a unit test assertion.
   This is the only real-session validation of the matcher value.
 
-**Result — AwaitingInput: ☐ PASS / ☐ FAIL — date/initials:**
-**Result — Completed: ☐ PASS / ☐ FAIL — date/initials:**
-**Result — Error (DEFERRED): ☐ N/A — deferred (SubagentStop no failure discriminator)**
+**Result — AwaitingInput: ☑ PASS — 2026-06-10 / KL.** Hook `Permission` fired (state file
+showed `{"event":"Permission"}`), badge `Awaiting input` while the dialog was up, `Running`
+after approval, `Idle` at turn end. Required PR #31 (Ink renders space runs as
+cursor-forward CSI sequences → patterns stored whitespace-free, matched against a
+whitespace-stripped window) and PR #32 (core row `(AwaitingInput, Ready) => Idle` + gate
+suppresses scraped `NeedsInput` everywhere and scraped `Ready` from `AwaitingInput` — the
+resolved dialog's text lingers in the rolling window and re-pinned the state).
+**Result — Completed: ☑ PASS — 2026-06-10 / KL.** `/exit` inside the session → badge
+`Completed` via the `SessionEnd` hook.
+**Result — Error (DEFERRED): ☑ N/A — deferred (SubagentStop no failure discriminator)**
 
 ---
 
@@ -212,7 +232,10 @@ regression. See design §3.4 deviation note and the deferred items section below
 - `json_namespace.rs` `inject_then_retract_preserves_hand_formatted_foreign_values`: retract
   leaves foreign keys untouched.
 
-**Result: ☐ PASS / ☐ FAIL — date/initials:**
+**Result: ☑ PASS — 2026-06-10 / KL.** After **Close**: all spectty-hook rows removed from
+`settings.json` (foreign `gentle-ai` hook + `permissions.allow` 69 entries intact), the
+`spectty` MCP row removed from `~/.claude.json`, and `spectty-{id}.state` deleted from the
+runtime dir. Verified by direct filesystem inspection immediately after the click.
 
 ---
 
@@ -256,7 +279,12 @@ regression. See design §3.4 deviation note and the deferred items section below
 - **Manual-only gap**: a packaged launch (not `cargo run`) is the only validation that
   Tauri's sidecar resolution path works end-to-end with a real Claude Code binary.
 
-**Result: ☐ PASS / ☐ FAIL — date/initials:**
+**Result: ☑ PASS — 2026-06-10 / KL.** The ENTIRE acceptance run was executed from the
+packaged bundle (`target/debug/bundle/macos/Spectty.app`). `Contents/MacOS/` contains
+`spectty` (26 MB), `spectty-hook` (490 KB), `spectty-mcp` (544 KB); the injected hook rows
+point at the bundle path and the state files prove the bundled sidecar executed.
+Local-dev gotcha recorded: `tauri build` clobbers `target/debug/spectty-hook` with the
+RELEASE sidecar copy — run `cargo build -p spectty-hook` before `cargo test --workspace`.
 
 ---
 
@@ -270,7 +298,7 @@ spectty-hook.exe --event Stop
 Failure does **NOT block M3** — informational only. The native binary avoids shell-quoting
 issues on Windows; the atomic `rename` on Windows is handled by Rust's `fs::rename`.
 
-**Result: ☐ PASS / ☐ FAIL / ☐ SKIP (no Windows host) — date/initials:**
+**Result: ☑ SKIP (no Windows host) — 2026-06-10 / KL.** Informational only; does not gate M3.
 
 ---
 
@@ -329,6 +357,19 @@ All macOS criteria (11.1–11.5) must pass for **M3 acceptance = PASS**; Windows
 informational. Record real-run results in the table above when executed against a live
 Claude Code install.
 
-The automated floor runs green on `main` after PR-4 merge (`cargo test --workspace`,
-231 tests passing). It guards every mechanical core of the five criteria; the manual run
-validates the real-CLI-specific gaps that synthetic fixtures cannot reach.
+**M3 ACCEPTANCE = PASS — 2026-06-10 / KL.** All gating criteria 11.1–11.5 PASS on macOS
+(aarch64), Claude Code v2.1.172, packaged debug bundle; 11.6 SKIP (no Windows host).
+
+The run surfaced and fixed three live-only defects (each TDD'd with the real captured
+evidence as fixture, adversarially reviewed with fresh context, and merged before
+re-running):
+
+| PR | Defect | Fix |
+|----|--------|-----|
+| #30 | Idle TUI redraw scraped as `Working` bounced hook-sourced `Idle`→`Running`; boot banner trapped `Starting` at `Running` | Gate suppresses scraped `Working` from `Idle`/`Starting` |
+| #31 | Ink emits space runs as cursor-forward CSI → ANSI-stripped window concatenates words → spaced patterns never matched | Patterns stored whitespace-free, matched against a whitespace-stripped window |
+| #32 | Resolved dialog text lingers in the 8KB window re-pinning `AwaitingInput`; core row `(AwaitingInput, Ready) => Running` blocked hook `Stop` from reaching `Idle` | Core row → `Idle`; gate suppresses scraped `NeedsInput` everywhere + scraped `Ready` from `AwaitingInput` |
+
+The automated floor runs green on `main` after the three fixes (`cargo test --workspace`,
+252 tests passing). It guards every mechanical core of the five criteria; the manual run
+validated the real-CLI-specific gaps that synthetic fixtures cannot reach.

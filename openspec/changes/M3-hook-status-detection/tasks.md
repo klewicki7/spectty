@@ -578,23 +578,23 @@ pass/fail gate.
 > (Slice 2, 10.4) is EMPIRICAL — refining it is a one-line DATA change to
 > `PERMISSION_PROMPT_MATCHER` + a new unit assertion, never a Core change.
 
-- [ ] 11.1 (Slice 1) bypass-permissions Claude session — submit a task → badge `Running`;
+- [x] 11.1 (Slice 1) bypass-permissions Claude session — submit a task → badge `Running`;
   turn ends → badge `Idle` within one QUIESCE tick (200ms), WITHOUT depending on scraped TUI
   text. PRIMARY REGRESSION FIX. `[REQ:acceptance-gate/criterion-1 → Scenario: (1) Bypass-permissions
   session — Stop drives badge to Idle without scraping]` `[manual]`
-- [ ] 11.2 Inspect `~/.claude/settings.json` → managed `Stop` + `UserPromptSubmit` hook entries
+- [x] 11.2 Inspect `~/.claude/settings.json` → managed `Stop` + `UserPromptSubmit` hook entries
   present; foreign keys intact; no Spectty row in `mcpServers` (that's `.claude.json`). `[REQ:acceptance-gate/criterion-2
   → Scenario: (2) settings.json contains managed hooks with foreign keys intact]` `[manual]`
-- [ ] 11.3 (Slice 2) Permission prompt → `AwaitingInput`; session ends cleanly → `Completed`;
+- [x] 11.3 (Slice 2) Permission prompt → `AwaitingInput`; session ends cleanly → `Completed`;
   API failure → `Error`. Each driven by the hook event, not by scraping. `[REQ:acceptance-gate/criterion-3
   → Scenario: (3) Full lifecycle]` `[manual]`
-- [ ] 11.4 Close the session → PTY terminates; managed hook rows absent from settings.json;
+- [x] 11.4 Close the session → PTY terminates; managed hook rows absent from settings.json;
   `.state` file deleted; foreign keys intact. `[REQ:acceptance-gate/criterion-4 → Scenario: (4)
   Close removes hooks, state file is deleted]` `[manual]`
-- [ ] 11.5 Packaged build (not `cargo run`) — both `spectty-mcp` AND `spectty-hook` resolve from
+- [x] 11.5 Packaged build (not `cargo run`) — both `spectty-mcp` AND `spectty-hook` resolve from
   bundle; Claude Code starts with both registered. `[REQ:acceptance-gate/criterion-5 → Scenario:
   (5) Both sidecars resolve in a packaged build]` `[manual]`
-- [ ] 11.6 (best-effort, ungated) Windows `spectty-hook` binary smoke — failure does NOT block M3.
+- [x] 11.6 (best-effort, ungated) — SKIP (no Windows host) Windows `spectty-hook` binary smoke — failure does NOT block M3.
   `[REQ:cross-platform/macos-gating-windows-best-effort]` `[manual]`
 - [x] 11.7 DOC: append D21-D25 ADR notes to `docs/decisions/0004-agent-agnostic-core.md` — one
   note per decision (D21–D25), referencing the implementing files. M3 risks R-PathAgreement and
@@ -607,8 +607,8 @@ pass/fail gate.
   **DONE (PR-5)**: deferral documented in `docs/decisions/0004-agent-agnostic-core.md` §M3 deferred
   items and in `openspec/changes/M3-hook-status-detection/acceptance.md` §Deferred items.
   Checklist doc ready at `openspec/changes/M3-hook-status-detection/acceptance.md`.
-- [ ] **Gate (WU-11)**: all macOS criteria (11.1–11.5) pass → M3 acceptance PASS; record results for
-  `sdd-verify`. Windows (11.6) informational only.
+- [x] **Gate (WU-11)**: all macOS criteria (11.1–11.5) PASS (2026-06-10/KL) → M3 acceptance PASS; results
+  recorded in acceptance.md for `sdd-verify`. Windows (11.6) SKIP — informational only.
 
 ---
 
