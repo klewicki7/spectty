@@ -24,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 spectty-core = { workspace = true }
 spectty-adapters = { path = "../crates/adapters" }
 tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde = { workspace = true }
 # portable-pty lives here too (not just adapters): the read-thread/Channel wiring
 # and the real-PTY integration test drive PtyAdapter against an actual pty. Core
