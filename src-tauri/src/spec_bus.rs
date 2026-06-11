@@ -571,7 +571,9 @@ mod tests {
 
         // Wait (bounded) for the first emit, then stop the loop.
         let first = tokio::task::spawn_blocking(move || {
-            emit_rx.recv_timeout(Duration::from_secs(5)).map(|c| c.content)
+            emit_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map(|c| c.content)
         })
         .await
         .expect("recv task panicked");

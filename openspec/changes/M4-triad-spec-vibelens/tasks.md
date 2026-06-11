@@ -184,9 +184,10 @@ key → `Ok(None)`; transport error → `PersistenceError::Backend`, never panic
 - [x] 1.6 GREEN: create `crates/adapters/src/persistence/engram_http.rs` — private
   `pub(crate) trait EngramHttp: Send + Sync { fn post_observation(&self, topic_key: &str,
   payload: &str) -> Result<(), EngramHttpError>; fn get_observation(&self, topic_key: &str,
-  since: Option<i64>) -> Result<Option<Obs>, EngramHttpError>; }` + `struct Obs { content:
-  String, updated_at: i64 }` + the in-memory `FakeEngramHttp` (test module). Field names per
-  G1 (WU-0). `[M4-REQ-02]` `[unit][D26]`
+  since: Option<&str>) -> Result<Option<Obs>, EngramHttpError>; }` + `struct Obs { content:
+  String, updated_at: String }` + the in-memory `FakeEngramHttp` (test module). Field names AND
+  types per G1 (WU-0): engram returns `updated_at` as a `"YYYY-MM-DD HH:MM:SS"` STRING (not an
+  `i64`), so the change-detect feed is a `String` and `since` is `Option<&str>`. `[M4-REQ-02]` `[unit][D26]`
 - [x] 1.7 GREEN: rewrite `crates/adapters/src/persistence/engram.rs` — `EngramAdapter { http:
   Arc<dyn EngramHttp>, rt: tokio::runtime::Handle }`; `upsert`/`get` `block_on` the async
   reqwest impl behind `EngramHttp`; map transport failure → `PersistenceError::Backend`. Add
@@ -227,11 +228,17 @@ scripted payloads + injected `emit` closure (mirrors `observe_and_diff` / M3 `ru
   `[unit][D28]`
 - [x] 2.5 RED: `spec_bus_tolerates_absent_observation` — port returns `Ok(None)` (key not yet
   written) → no emit, no error. `[M4-REQ-03]` `[unit]`
-- [x] 2.6 GREEN: create `src-tauri/src/spec_bus.rs` (or `adapters`): `pub struct SpecBus {
-  port: Arc<dyn PersistencePort>, topic_key: String, last_updated_at: Option<i64> }` with
-  `pub fn poll(&mut self, emit: &mut dyn FnMut(Change))` (pure-testable; injected emit) and a
-  `run_poll_loop` Tokio task wrapper (`interval(SPECTTY_POLL_MS default 2000)`). Deserialize
-  `String → SpecContract` adapter-side via `serde_json`. `[M4-REQ-03]` `[unit][D27][D28]`
+- [x] 2.6 GREEN: create `src-tauri/src/spec_bus.rs`: `pub struct SpecBus { reader: Arc<dyn
+  PollReader>, topic_key: String, last_updated_at: Option<String> }` (per G1 `updated_at` is a
+  STRING, not `i64`) with `pub fn poll(&mut self, emit: &mut dyn FnMut(Change))` (pure-testable;
+  injected emit) AND `pub async fn run_poll_loop(bus, interval, shutdown, emit)` — the async/Tokio
+  seam (M4-REQ-03): `tokio::time::interval(poll_interval())`, a `watch`-based shutdown signal
+  (graceful session-close / app-shutdown, mirrors `run_signal_loop`), and `spawn_blocking` around
+  the sync poll step so the blocking `ReqwestEngramHttp` reader never runs on a runtime worker.
+  Port-only fallback (`PortPollReader`) change-detects by EQUALITY (a content hash is NOT
+  monotonic — see Finding-1 fix), emitting a synthetic monotonic counter so `decide()`'s strict
+  `>` compare stays valid. Deserialize `String → SpecContract` adapter-side via `serde_json`
+  (WU-4). `[M4-REQ-03]` `[unit][D27][D28]`
 - [x] **Gate (WU-2)**: `cargo test --workspace` green (5 SpecBus unit tests); fmt/clippy clean;
   `cargo deny ... check bans` → `bans ok`.
 
@@ -300,6 +307,14 @@ emits, no `AppHandle`) + restart-hydrate FIRST.
 > the change → emits `spec_updated { session_id, spec: SpecContract }`. `get_spec(id)` reads
 > on demand. On spawn/re-attach: ONE `get(spectty/{sid}/spec)` + `get(.../progress)` BEFORE the
 > poll interval → emit initial `spec_updated` (UI restores instantly, exit criterion 6).
+>
+> PERF NOTE (carry-in from PR-1 review, Finding 5): `EngramHttp::ensure_session` currently
+> POSTs `/sessions` on EVERY upsert (correct + idempotent, INSERT-OR-IGNORE). Before the 2s
+> production poll/effect loop goes live, MEMOIZE the already-ensured session ids (a
+> `OnceCell`/seen-set keyed by `session_id`) so each session row is created at most once per
+> process and the loop does not double write traffic. Also reconcile the D5 fallback: once real
+> session ids are wired, the `"spectty"` stopgap in `engram_session_id` should be unreachable for
+> canonical `spectty/{sid}/{spec|progress|cost}` keys (a `debug_assert` + test already pin this).
 
 - [ ] 4.1 RED: `spectty_mcp_tools_list_schema_is_byte_frozen` — assert `tools/list` output for
   the 5 tools is byte-for-byte identical to the M3-frozen schema fixture; only `tools/call`

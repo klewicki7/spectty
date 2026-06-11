@@ -182,6 +182,11 @@ impl ReqwestEngramHttp {
     /// Ensure the engram session row exists before posting an observation. Engram's
     /// `POST /sessions` is idempotent (INSERT-OR-IGNORE), so calling it per upsert is
     /// safe; a non-success here surfaces as a transport error like any other.
+    ///
+    // PERF (WU-4): this POSTs on EVERY upsert. Correct and idempotent, but once the 2s
+    // production poll/effect loop goes live it doubles the write traffic. Memoize the
+    // already-ensured session ids (a `OnceCell`/seen-set keyed by session_id) before WU-4
+    // wires real sessions, so each session row is created at most once per process.
     async fn ensure_session(&self, session_id: &str) -> Result<(), EngramHttpError> {
         let resp = self
             .client
@@ -301,14 +306,41 @@ struct RawObs {
     updated_at: String,
 }
 
-/// Derive the engram session id from a `spectty/{session_id}/...` topic_key. Falls
-/// back to `"spectty"` for non-namespaced keys so the upsert still has a valid session.
+/// Derive the engram session id from a topic_key.
+///
+/// The D5 CANONICAL key form is `spectty/{session_id}/{spec|progress|cost}`, from which
+/// this returns `{session_id}`. Any key that is NOT in that namespaced form falls back to
+/// the single session `"spectty"`.
+///
+/// The `"spectty"` fallback is a PRE-WU-4 STOPGAP: before real sessions are wired into the
+/// poll/effect path (WU-4), a few non-namespaced keys may be written, and they must still
+/// land on a valid engram session rather than fail the upsert. Once WU-4 plumbs real
+/// session ids, every production key is canonical and the fallback should never trigger
+/// for `spectty/{sid}/...` keys — the debug_assert below pins that, and a test in this
+/// module proves the canonical `spec|progress|cost` forms never collapse onto `"spectty"`.
 fn engram_session_id(topic_key: &str) -> String {
     let mut parts = topic_key.split('/');
-    match (parts.next(), parts.next()) {
-        (Some("spectty"), Some(sid)) if !sid.is_empty() => sid.to_string(),
-        _ => "spectty".to_string(),
-    }
+    let sid = match (parts.next(), parts.next()) {
+        (Some("spectty"), Some(sid)) if !sid.is_empty() => Some(sid.to_string()),
+        _ => None,
+    };
+    // A canonical D5 key (`spectty/{sid}/{spec|progress|cost}`) MUST resolve to its own
+    // session, never the `"spectty"` stopgap. Catch a regression in debug builds.
+    debug_assert!(
+        !(sid.is_none() && is_canonical_d5_key(topic_key)),
+        "canonical D5 key `{topic_key}` must NOT hit the `spectty` fallback"
+    );
+    sid.unwrap_or_else(|| "spectty".to_string())
+}
+
+/// Is `topic_key` a canonical D5 key (`spectty/{session_id}/{spec|progress|cost}` with a
+/// non-empty session id)? Used only to guard the fallback in debug builds and tests.
+fn is_canonical_d5_key(topic_key: &str) -> bool {
+    let mut parts = topic_key.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("spectty"), Some(sid), Some("spec" | "progress" | "cost"), None) if !sid.is_empty()
+    )
 }
 
 #[cfg(test)]
@@ -380,5 +412,25 @@ mod tests {
         assert_eq!(engram_session_id("spectty/42/spec"), "42");
         assert_eq!(engram_session_id("spectty//spec"), "spectty");
         assert_eq!(engram_session_id("other/key"), "spectty");
+    }
+
+    // Finding 3: the canonical D5 forms `spectty/{sid}/{spec|progress|cost}` MUST resolve
+    // to their own session id and NEVER collapse onto the `"spectty"` stopgap fallback.
+    #[test]
+    fn canonical_d5_keys_never_hit_the_spectty_fallback() {
+        for kind in ["spec", "progress", "cost"] {
+            for sid in ["42", "abc-123", "session-7"] {
+                let key = format!("spectty/{sid}/{kind}");
+                assert!(
+                    is_canonical_d5_key(&key),
+                    "`{key}` should be recognized as a canonical D5 key"
+                );
+                assert_eq!(
+                    engram_session_id(&key),
+                    sid,
+                    "`{key}` must resolve to its own session id, never the `spectty` fallback"
+                );
+            }
+        }
     }
 }
