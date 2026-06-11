@@ -25,7 +25,7 @@
 //! fetches the observation and compares `updated_at` against the per-topic
 //! `last_updated_at`, emitting only on a STRICTLY-GREATER value.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use spectty_core::ports::{PersistenceError, PersistencePort};
@@ -87,6 +87,20 @@ impl SpecBus {
     /// EXACTLY ONCE iff `updated_at` is strictly greater than the last seen value,
     /// then advance `last_updated_at`. A read error or an absent observation is a
     /// tolerated no-op (the loop keeps running). Mirrors `observe_and_diff`.
+    ///
+    /// # Invariant: `updated_at` MUST be monotonic-per-change
+    ///
+    /// This comparator uses strict ordering (`>`), so it is ONLY correct when the
+    /// supplied `updated_at` token is monotonically non-decreasing across genuine
+    /// changes — i.e. a later change always yields a `updated_at` that sorts strictly
+    /// above the previous one. That holds for engram's real `updated_at`
+    /// (`"YYYY-MM-DD HH:MM:SS"`, lexicographically monotonic) and for the synthetic
+    /// monotonic counter that [`PortPollReader`] emits.
+    ///
+    /// Do NOT feed this a content hash directly: a hash is NOT monotonic across content
+    /// changes, so any change whose new hash sorts below the previous one would be
+    /// silently swallowed (and an A→B→A revert would be lost). [`PortPollReader`] owns
+    /// its own EQUALITY-based change detection precisely to uphold this invariant.
     pub fn decide(
         &mut self,
         observed: Result<Option<Obs>, PersistenceError>,
@@ -133,54 +147,88 @@ pub fn poll_interval() -> Duration {
 }
 
 /// A [`PollReader`] over the Core [`PersistencePort`]. Because the port returns only the
-/// payload `String` (no `updated_at`), this reader synthesizes a change-detection token
-/// by hashing the content: identical payloads keep the same token (no re-emit), a
-/// changed payload yields a new one. This preserves the D28 "emit only on change"
-/// contract through the UNCHANGED port for callers that only have a `PersistencePort`.
+/// payload `String` (no `updated_at`), this reader does its OWN equality-based change
+/// detection: it remembers the last payload's content hash and, when the current hash
+/// DIFFERS, bumps a monotonic revision counter and reports that counter as the synthetic
+/// `updated_at`. Identical payloads keep the previous counter (no re-emit downstream).
+///
+/// # Why equality, not ordering
+///
+/// A content hash is NOT monotonic across content changes, so a hash CANNOT be fed
+/// directly into [`SpecBus::decide`]'s strict `>`-comparison: a change whose new hash
+/// sorts below the previous one (e.g. an approval flip `Pending → Approved`) — or any
+/// A→B→A revert — would be silently swallowed. By detecting change with EQUALITY here
+/// (`Some(h) != last`) and emitting a genuinely monotonic counter, we both preserve the
+/// D28 "emit only on change" contract AND uphold `decide()`'s monotonic-token invariant.
 ///
 /// The richer engram-native reader (real `updated_at`) is wired in WU-4 where the
 /// adapter's HTTP seam is available; this content-hash reader is the port-only fallback
 /// and the default wiring for `InMemoryPersistenceAdapter`-backed sessions.
 pub struct PortPollReader {
     port: Arc<dyn PersistencePort>,
+    // Equality-based change state. `read(&self)` is shared (`&self`), so interior
+    // mutability is required; the poll loop is single-threaded per topic so a plain
+    // `Mutex` is sufficient and contention-free.
+    state: Mutex<PortReaderState>,
+}
+
+/// Last-seen content hash + the monotonic revision counter handed downstream as the
+/// synthetic `updated_at`.
+#[derive(Default)]
+struct PortReaderState {
+    last_content_hash: Option<u64>,
+    revision: u64,
 }
 
 impl PortPollReader {
     /// Build a reader over `port`.
     pub fn new(port: Arc<dyn PersistencePort>) -> Self {
-        Self { port }
+        Self {
+            port,
+            state: Mutex::new(PortReaderState::default()),
+        }
     }
 }
 
 impl PollReader for PortPollReader {
     fn read(&self, topic_key: &str) -> Result<Option<Obs>, PersistenceError> {
-        Ok(self.port.get(topic_key)?.map(|content| {
-            // Content hash stands in for `updated_at` when the port can't expose it.
-            // A formatted hash keeps the monotonic-by-change semantics decide() needs
-            // (different content -> different token -> emit; same content -> no emit).
-            let token = content_token(&content);
-            Obs {
-                content,
-                updated_at: token,
-            }
+        let Some(content) = self.port.get(topic_key)? else {
+            return Ok(None);
+        };
+        let hash = content_hash(&content);
+
+        let mut state = self.state.lock().expect("port reader state poisoned");
+        // EQUALITY check: only a genuinely different payload bumps the revision. This
+        // is what makes reverts and non-monotonic-hash flips emit correctly — the
+        // monotonic counter (never the hash) is what reaches `decide()`'s `>` compare.
+        if state.last_content_hash != Some(hash) {
+            state.last_content_hash = Some(hash);
+            state.revision += 1;
+        }
+        // Zero-pad so the synthetic token compares consistently by width, matching the
+        // lexicographic shape engram's real `updated_at` uses.
+        let token = format!("{:020}", state.revision);
+
+        Ok(Some(Obs {
+            content,
+            updated_at: token,
         }))
     }
 }
 
-/// Stable change token for a payload string (port-only fallback change detection).
-fn content_token(content: &str) -> String {
+/// Stable content hash for a payload string (port-only fallback change detection). Used
+/// ONLY for equality comparison inside [`PortPollReader`] — never as an ordering key.
+fn content_hash(content: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     content.hash(&mut h);
-    // Zero-padded hex keeps lexicographic comparison consistent with width.
-    format!("{:016x}", h.finish())
+    h.finish()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// A scripted [`PollReader`]: pops one result per `read` call so a test can drive an
     /// exact observation sequence without a daemon (mirrors `ScriptedRunner`).
@@ -325,5 +373,102 @@ mod tests {
         if std::env::var("SPECTTY_POLL_MS").is_err() {
             assert_eq!(poll_interval(), Duration::from_millis(DEFAULT_POLL_MS));
         }
+    }
+
+    // ── Finding 1 (BLOCKER) RED → GREEN: the port-only reader must change-detect by
+    //    INEQUALITY, never by lexicographic ORDERING. A content hash is NOT monotonic
+    //    across content changes, so feeding it into `decide()`'s `>`-comparison silently
+    //    swallows any change whose new hash sorts below the previous one. ────────────
+
+    /// The exact real-payload pair that proved the defect: a plan-approval flip from
+    /// `"Pending"` to `"Approved"`. `hash("...Approved")` sorts BELOW `hash("...Pending")`,
+    /// so an ordering comparator would never emit the flip. Equality MUST emit it.
+    #[test]
+    fn port_poll_reader_emits_on_approval_pending_to_approved_flip() {
+        use spectty_adapters::InMemoryPersistenceAdapter;
+
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::new(port.clone()));
+        let mut bus = SpecBus::new(reader, "spectty/s/spec");
+
+        let mut emitted: Vec<Change> = Vec::new();
+
+        let pending = r#"{"approval":"Pending"}"#;
+        let approved = r#"{"approval":"Approved"}"#;
+        // Sanity: this pair is exactly the non-monotonic case (new hash < old hash).
+        // An ordering comparator fed the raw hash would swallow the flip; equality won't.
+        assert!(
+            content_hash(approved) < content_hash(pending),
+            "test premise: hash(Approved) must sort below hash(Pending) — the defect case"
+        );
+
+        port.upsert("spectty/s/spec", pending.to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        assert_eq!(emitted.len(), 1, "first payload (Pending) must emit");
+
+        port.upsert("spectty/s/spec", approved.to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        assert_eq!(
+            emitted.len(),
+            2,
+            "the Pending -> Approved flip MUST emit even though hash(Approved) < hash(Pending)"
+        );
+        assert_eq!(emitted[1].content, approved);
+    }
+
+    /// An A -> B -> A revert: every transition is a real change and MUST emit, even
+    /// though returning to A re-uses a previously-seen token (ordering would swallow it).
+    #[test]
+    fn port_poll_reader_emits_on_a_b_a_revert() {
+        use spectty_adapters::InMemoryPersistenceAdapter;
+
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::new(port.clone()));
+        let mut bus = SpecBus::new(reader, "spectty/s/spec");
+
+        let mut emitted: Vec<Change> = Vec::new();
+
+        port.upsert("spectty/s/spec", "A".to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        port.upsert("spectty/s/spec", "B".to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        port.upsert("spectty/s/spec", "A".to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+
+        assert_eq!(
+            emitted.len(),
+            3,
+            "A->B->A: every change must emit (revert to A is still a change)"
+        );
+        assert_eq!(emitted[2].content, "A");
+    }
+
+    /// Re-writing the IDENTICAL payload must NOT emit (idempotent upsert, no change).
+    #[test]
+    fn port_poll_reader_does_not_emit_on_identical_rewrite() {
+        use spectty_adapters::InMemoryPersistenceAdapter;
+
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::new(port.clone()));
+        let mut bus = SpecBus::new(reader, "spectty/s/spec");
+
+        let mut emitted: Vec<Change> = Vec::new();
+
+        port.upsert("spectty/s/spec", "same".to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        // Re-write identical content several times.
+        port.upsert("spectty/s/spec", "same".to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        port.upsert("spectty/s/spec", "same".to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+
+        assert_eq!(
+            emitted.len(),
+            1,
+            "identical content must emit exactly once (no re-emit on rewrite)"
+        );
     }
 }
