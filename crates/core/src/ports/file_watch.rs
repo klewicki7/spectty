@@ -26,8 +26,7 @@ use thiserror::Error;
 /// One `FileChanged` represents a coalesced burst: the de-duplicated set of paths that
 /// changed within a single debounce window. The pipeline treats it as a "something changed,
 /// re-diff now" signal — it does not need per-event granularity, so the batch is a
-/// lightweight set of paths plus the count of raw events that were coalesced (useful for
-/// logging/metrics).
+/// lightweight set of paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChanged {
     /// The de-duplicated paths that changed within the debounce window.

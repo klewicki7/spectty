@@ -503,6 +503,10 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > emit `diff_updated`. Cooperative `spectty_diff` bypasses debounce; FileWatch is the generic
 > fallback (`emits_diff_signals==false`). Shared in-flight guard; hash-dedup makes double-fire safe.
 
+- [ ] 8.0 **(PR-4 review carry-in)** Before wiring `NotifyFileWatcher` into the pipeline, EXCLUDE
+  `.git/` from the watch-trigger set (filter batch paths under `.git/`; ideally honor `.gitignore`).
+  Without it the pipeline self-triggers: diff → git churns `.git/index` → file event → re-diff.
+  Hash-dedup blunts the explain cost but the watcher still wakes per internal git write. `[D35][D37]`
 - [ ] 8.1 RED: `vibelens_adapter_parses_show_diff_explanation_response` — fake stdio child scripted
   with a JSON-RPC `show_diff_explanation` response → parsed into `DiffExplanation { files, summary }`.
   `[M4-REQ-12]` `[unit][D36]`
