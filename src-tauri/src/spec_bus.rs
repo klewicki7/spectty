@@ -83,6 +83,22 @@ impl SpecBus {
         }
     }
 
+    /// Build a bus pre-seeded with `last_updated_at` already observed (Finding 3, PR-2
+    /// review). Pair this with [`PortPollReader::seeded`] so the FIRST tick over an
+    /// unchanged, just-hydrated payload is a no-op (no duplicate `spec_updated`). Use
+    /// [`PortPollReader::SEEDED_TOKEN`] as the seed when the reader was built with `seeded`.
+    pub fn seeded(
+        reader: Arc<dyn PollReader>,
+        topic_key: impl Into<String>,
+        last_updated_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            reader,
+            topic_key: topic_key.into(),
+            last_updated_at: Some(last_updated_at.into()),
+        }
+    }
+
     /// PURE one-tick decision: given the observation read this tick, invoke `emit`
     /// EXACTLY ONCE iff `updated_at` is strictly greater than the last seen value,
     /// then advance `last_updated_at`. A read error or an absent observation is a
@@ -246,11 +262,34 @@ struct PortReaderState {
 }
 
 impl PortPollReader {
-    /// Build a reader over `port`.
+    /// Build a reader over `port` with no prior content seen — the first non-empty read
+    /// counts as a change.
     pub fn new(port: Arc<dyn PersistencePort>) -> Self {
         Self {
             port,
             state: Mutex::new(PortReaderState::default()),
+        }
+    }
+
+    /// The synthetic `updated_at` token a [`seeded`](Self::seeded) reader reports for the
+    /// unchanged hydrated payload (revision `1`, zero-padded). Seed the paired
+    /// [`SpecBus::seeded`] with this value so the first unchanged tick is a no-op.
+    pub const SEEDED_TOKEN: &'static str = "00000000000000000001";
+
+    /// Build a reader PRE-SEEDED with the hash of `initial_content` (Finding 3, PR-2
+    /// review). On (re-)attach the session hydrates the persisted spec with one emit, then
+    /// spawns this poll loop; seeding from the same hydrated payload makes the FIRST tick a
+    /// no-op (the content is unchanged), so the UI is not handed a duplicate `spec_updated`.
+    /// The revision starts at `1` ([`SEEDED_TOKEN`](Self::SEEDED_TOKEN)) so the very next
+    /// genuine change advances it to a strictly greater synthetic token, exactly as an
+    /// un-seeded reader's first change would.
+    pub fn seeded(port: Arc<dyn PersistencePort>, initial_content: &str) -> Self {
+        Self {
+            port,
+            state: Mutex::new(PortReaderState {
+                last_content_hash: Some(content_hash(initial_content)),
+                revision: 1,
+            }),
         }
     }
 }
@@ -430,6 +469,46 @@ mod tests {
         bus.poll(&mut |c| emitted.push(c));
         assert_eq!(emitted.len(), 2, "changed content must re-emit");
         assert_eq!(emitted[1].content, "v2");
+    }
+
+    // Finding 3 (PR-2 review): on re-attach the session HYDRATES the persisted spec (one
+    // emit), then spawns a fresh poll loop. An un-seeded PortPollReader has no prior hash,
+    // so its FIRST tick treats the unchanged persisted payload as new and re-emits the SAME
+    // spec → a duplicate spec_updated. A reader SEEDED from the hydrated content must make
+    // that first tick a no-op: hydrate + first poll → EXACTLY ONE emit total.
+    #[test]
+    fn seeded_reader_does_not_re_emit_the_hydrated_payload_on_first_tick() {
+        use spectty_adapters::InMemoryPersistenceAdapter;
+
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+
+        // The payload that was already persisted and emitted by the hydrate step.
+        let hydrated = r#"{"intent":"x","tasks":[]}"#;
+        port.upsert("spectty/s/spec", hydrated.to_string()).unwrap();
+
+        // The hydrate emit is modeled by the caller; here we count ONLY the poll-loop emits.
+        // Seed the reader from the hydrated content so the unchanged first tick is a no-op.
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::seeded(port.clone(), hydrated));
+        let mut bus = SpecBus::seeded(reader, "spectty/s/spec", PortPollReader::SEEDED_TOKEN);
+
+        let mut emitted: Vec<Change> = Vec::new();
+        bus.poll(&mut |c| emitted.push(c)); // first tick: content unchanged since hydrate
+        assert!(
+            emitted.is_empty(),
+            "a seeded reader must NOT re-emit the hydrated payload on its first tick"
+        );
+
+        // A genuine subsequent change still emits exactly once.
+        let changed = r#"{"intent":"x","tasks":[{"id":"t1","title":"t","status":"pending"}]}"#;
+        port.upsert("spectty/s/spec", changed.to_string()).unwrap();
+        bus.poll(&mut |c| emitted.push(c));
+        assert_eq!(
+            emitted.len(),
+            1,
+            "after the seeded no-op tick, a real change must emit exactly once"
+        );
+        assert_eq!(emitted[0].content, changed);
     }
 
     #[test]

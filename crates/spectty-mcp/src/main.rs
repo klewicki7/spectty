@@ -30,6 +30,7 @@
 //! NOT tauri (D16). The engram wire shapes are the G1-verified ones the adapter uses.
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -411,12 +412,21 @@ impl ReqwestEngramClient {
     /// Build a client from the environment: `ENGRAM_BASE_URL` (default
     /// [`ENGRAM_BASE_URL`]) and `SPECTTY_ENGRAM_PROJECT` (default `"spectty"`).
     fn from_env() -> Self {
+        // A 2s request timeout is REQUIRED (spectty-spec-effect.md:31,36: the effect must
+        // "return promptly + degrade"). Without it, an accepted-but-unresponsive engram
+        // daemon would hang the agent's turn forever. We `expect` rather than fall back to
+        // the default (timeout-less) client: a builder failure is a programmer error, and a
+        // silent fallback would reintroduce the unbounded-hang it exists to prevent.
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("reqwest blocking client builder with a 2s timeout must succeed");
         Self {
             base_url: std::env::var("ENGRAM_BASE_URL")
                 .unwrap_or_else(|_| ENGRAM_BASE_URL.to_string()),
             project: std::env::var("SPECTTY_ENGRAM_PROJECT")
                 .unwrap_or_else(|_| "spectty".to_string()),
-            client: reqwest::blocking::Client::new(),
+            client,
         }
     }
 

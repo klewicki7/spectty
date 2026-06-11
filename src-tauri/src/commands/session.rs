@@ -598,6 +598,13 @@ pub async fn spawn_session(
             // M4 WU-4 (D38): hydrate the spec pane IMMEDIATELY on (re-)attach — read the
             // persisted contract ONCE and emit before the poll interval, so a restart
             // restores instantly (exit criterion 6). Absent / engram-down → no emit.
+            //
+            // Finding 3 (PR-2 review): capture the EXACT persisted payload string so the
+            // poll reader/bus below can be SEEDED from it. Without seeding, the freshly
+            // spawned reader (no prior hash) would treat the unchanged payload as new on its
+            // first tick and re-emit the SAME spec → a duplicate `spec_updated`.
+            let spec_key = format!("spectty/{}/spec", id.0);
+            let hydrated_content = spec_port.get(&spec_key).ok().flatten();
             if let Some(initial) = hydrate_spec(spec_port.as_ref(), &id.0) {
                 let _ = app.emit("spec_updated", initial);
             }
@@ -607,8 +614,18 @@ pub async fn spawn_session(
             // at session close.
             let (spec_shutdown_tx, spec_shutdown_rx) = tokio::sync::watch::channel(false);
             {
-                let reader = Arc::new(PortPollReader::new(spec_port.clone()));
-                let bus = SpecBus::new(reader, format!("spectty/{}/spec", id.0));
+                // Seed the reader+bus from the hydrated payload so the first tick is a
+                // no-op (Finding 3). When nothing was hydrated, start fresh.
+                let bus = match &hydrated_content {
+                    Some(content) => {
+                        let reader = Arc::new(PortPollReader::seeded(spec_port.clone(), content));
+                        SpecBus::seeded(reader, spec_key.clone(), PortPollReader::SEEDED_TOKEN)
+                    }
+                    None => {
+                        let reader = Arc::new(PortPollReader::new(spec_port.clone()));
+                        SpecBus::new(reader, spec_key.clone())
+                    }
+                };
                 let emit_app = app.clone();
                 tokio::spawn(run_poll_loop(
                     bus,
