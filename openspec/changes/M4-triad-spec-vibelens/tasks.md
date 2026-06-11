@@ -503,48 +503,66 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > emit `diff_updated`. Cooperative `spectty_diff` bypasses debounce; FileWatch is the generic
 > fallback (`emits_diff_signals==false`). Shared in-flight guard; hash-dedup makes double-fire safe.
 
-- [ ] 8.0 **(PR-4 review carry-in)** Before wiring `NotifyFileWatcher` into the pipeline, EXCLUDE
-  `.git/` from the watch-trigger set (filter batch paths under `.git/`; ideally honor `.gitignore`).
-  Without it the pipeline self-triggers: diff → git churns `.git/index` → file event → re-diff.
-  Hash-dedup blunts the explain cost but the watcher still wakes per internal git write. `[D35][D37]`
-- [ ] 8.1 RED: `vibelens_adapter_parses_show_diff_explanation_response` — fake stdio child scripted
-  with a JSON-RPC `show_diff_explanation` response → parsed into `DiffExplanation { files, summary }`.
+- [x] 8.0 **(PR-4 review carry-in)** EXCLUDE `.git/` from the watch-trigger set — DONE.
+  `diff_pipeline::is_triggering_path`/`batch_should_trigger` filter any path with a `.git`
+  component; the FileWatch callback in `commands/session.rs` skips batches that are ONLY git
+  churn before running the pipeline (test `git_internal_paths_do_not_trigger_workspace_edits_do`).
+  `[D35][D37]`
+- [x] 8.1 RED→GREEN: `vibelens_adapter_builds_explanation_and_pushes_show_diff_explanation`
+  (renamed per G2). Per the G2 finding the adapter does NOT parse a response into a
+  `DiffExplanation` — `show_diff_explanation` is a WRITE. The test asserts the adapter BUILDS
+  the explanation locally and PUSHES it (title+diff+annotations) and returns the built value.
   `[M4-REQ-12]` `[unit][D36]`
-- [ ] 8.2 RED: `vibelens_adapter_degrades_on_unreachable_or_parse_fail` — child unreachable /
-  timeout / error / unparseable response → log + return a degraded marker ("unavailable" /
-  "parse error"), retain previous, NEVER crash. `[M4-REQ-14]` `[unit][D36]`
-- [ ] 8.3 RED: `pipeline_skips_explain_when_hash_unchanged` — same diff (same hash as
-  `last_diff_hash`) → NO `explain` call, NO `diff_updated` emit. `[M4-REQ-13]` `[unit][D37]`
-- [ ] 8.4 RED: `pipeline_explains_and_emits_once_on_change` — changed diff → `explain` called once,
-  `Session::update_diff`, EXACTLY ONE `diff_updated { session_id, explanation }`. `[M4-REQ-13][M4-REQ-17]`
-  `[unit][D37]`
-- [ ] 8.5 RED: `pipeline_truly_empty_diff_is_empty_no_mcp_call` — empty diff string →
-  `DiffExplanation::empty()`, NO MCP call. `[M4-REQ-13]` `[unit][D37]`
-- [ ] 8.6 RED: `pipeline_degrades_on_git_failure` — `GitPort::diff_head` errors → log + retain
-  previous, no crash. `[M4-REQ-14]` `[unit][D37]`
-- [ ] 8.7 RED: `spectty_diff_cooperative_bypasses_debounce_generic_falls_back` — cooperative
-  `spectty_diff` signal fires the pipeline immediately (no debounce wait); generic tier
-  (`emits_diff_signals==false`) uses debounced FileWatch; SAME downstream pipeline; in-flight
-  guard prevents double-fire. `[M4-REQ-15]` `[unit][D37]`
-- [ ] 8.8 GREEN: create `crates/adapters/src/diff/vibelens.rs` — `VibeLensMcpAdapter` impl
-  `DiffExplainerPort` (stdio child, JSON-RPC, lifecycle, degrade). `[M4-REQ-12][M4-REQ-14]`
-  `[unit][D36]`
-- [ ] 8.9 GREEN: add the diff pipeline to `src-tauri/src/session_runtime.rs` (alongside SpecBus /
-  `run_signal_loop`, same injected-emit discipline) + wire per-session FileWatch + `spectty_diff`
-  trigger in `commands/session.rs`; add `get_diff_explanation(id) -> Option<DiffExplanation>` to
-  `commands/spec.rs`; emit `diff_updated` via v2 `Emitter` only on actual change. `[M4-REQ-15][M4-REQ-16][M4-REQ-17]`
-  `[unit][D37][D29]`
-- [ ] 8.10 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_diff` `tools/call` effect
-  fires the cooperative trigger (signal upsert/notify). Schema (`tools/list`) UNTOUCHED.
+- [x] 8.2 RED→GREEN: `vibelens_adapter_degrades_on_unreachable_or_parse_fail` — transport error
+  / unparseable response / JSON-RPC error → push degrades best-effort (logged via `eprintln`),
+  the locally-built explanation is STILL returned, NEVER crash. Plus
+  `vibelens_adapter_respawns_transport_after_crash` (restart-on-crash). `[M4-REQ-14]` `[unit][D36]`
+- [x] 8.3 RED→GREEN: `pipeline_skips_explain_when_hash_unchanged` — unchanged hash → NO explain,
+  NO emit. `[M4-REQ-13]` `[unit][D37]`
+- [x] 8.4 RED→GREEN: `pipeline_explains_and_emits_once_on_change` — changed diff → explain once,
+  EXACTLY ONE `diff_updated { session_id, explanation }`. (Dedup hash lives on the per-session
+  `DiffPipeline`, not `Session::update_diff` — see DEVIATION note in `diff_pipeline.rs`: keeps
+  Core untouched this slice; the Core fields stay available.) `[M4-REQ-13][M4-REQ-17]` `[unit][D37]`
+- [x] 8.5 RED→GREEN: `pipeline_truly_empty_diff_is_empty_no_mcp_call` — empty diff → `empty()`
+  cached, NO explainer call, NO emit. `[M4-REQ-13]` `[unit][D37]`
+- [x] 8.6 RED→GREEN: `pipeline_degrades_on_git_failure` (+ `pipeline_degrades_on_explainer_error`)
+  — git/explainer error → degrade, retain previous, no emit, no crash. `[M4-REQ-14]` `[unit][D37]`
+- [x] 8.7 RED→GREEN: `cooperative_and_generic_share_one_deduped_pipeline` — both triggers fan
+  into ONE shared `Arc<DiffPipeline>`; the in-flight guard + hash-dedup make a double-fire
+  harmless. The cooperative path bypasses debounce (immediate poll-driven run); the generic
+  tier (`emits_diff_signals==false`) uses the debounced FileWatch. `[M4-REQ-15]` `[unit][D37]`
+- [x] 8.8 GREEN: created `crates/adapters/src/diff/vibelens.rs` — `VibeLensMcpAdapter` impl
+  `DiffExplainerPort` over an `McpStdio` seam (real `npx -y vibelens-mcp` stdio child;
+  lazy-spawn/reuse/restart-on-crash; 2s-class timeouts; G2 display-SINK semantics).
+  `[M4-REQ-12][M4-REQ-14]` `[unit][D36]`
+- [x] 8.9 GREEN: added the diff pipeline as `src-tauri/src/diff_pipeline.rs` (DEVIATION from the
+  "in session_runtime.rs" sketch — kept as its own module mirroring `spec_bus.rs`, same
+  injected-emit discipline) + wired per-session FileWatch (generic tier) + `spectty_diff` poll
+  trigger (cooperative) in `commands/session.rs`; added `get_diff_explanation(session_id) ->
+  Option<DiffExplanation>` to `commands/spec.rs` (reads the pipeline's cached explanation via the
+  `DiffPipelines` managed registry); emits `diff_updated` via v2 `Emitter` only on actual change.
+  `[M4-REQ-15][M4-REQ-16][M4-REQ-17]` `[unit][D37][D29]`
+- [x] 8.10 GREEN: extended `crates/spectty-mcp/src/main.rs` — `spectty_diff` `tools/call` effect
+  upserts a trigger doc (with a nonce so consecutive triggers are detectable changes) to
+  `spectty/{session_id}/diff`; the app-side poll runs the pipeline. Schema (`tools/list`)
+  UNTOUCHED (byte-frozen test still green). Engram-down degrades `isError`. Includes the PINNED
+  cross-seam wire test (`spectty_diff_consecutive_triggers_write_distinct_docs_for_app_poll`).
   `[M4-REQ-08][M4-REQ-15]` `[unit][D16]`
-- [ ] 8.11 GREEN: add ONE `#[ignore]` `vibelens_real_npx_show_diff_explanation` test (un-ignore
-  only after G2/WU-9 pins the schema). `[M4-REQ-12]` `[manual][D36]`
-- [ ] **Gate (WU-8)**: `cargo test --workspace` green (7 fake-backed unit/integration tests; real
-  test `#[ignore]`d); fmt/clippy clean; `cargo deny ... check bans` → `bans ok`.
+- [x] 8.11 GREEN: added the `#[ignore]` `vibelens_real_npx_show_diff_explanation` test — asserts
+  the built explanation is returned (the push degrades gracefully without `npx`); un-ignore to
+  verify the WRITE envelope against the live server (G2). `[M4-REQ-12]` `[manual][D36]`
+- [x] **Gate (WU-8)**: `cargo test --workspace` green (tauri lib 86 incl. 8 diff_pipeline; adapters
+  157 +2ign incl. 6 vibelens +1ign; mcp 33 incl. 5 spectty_diff; core 52 unchanged — Core
+  quarantine intact); fmt clean; clippy `-D warnings` exit 0; `cargo deny ... check bans` → `bans
+  ok`; `pnpm -C ui test` 64 pass (UI untouched).
 
-> **Slice 4 COMPLETE after WU-8.** PR-4 = WU-6 + WU-7 + WU-8 (+ WU-9 gate doc). Green:
-> GitPort/dedup unit + fake-stdio contract + pipeline integration; G2 documented. Exit criteria
-> 4 (VibeLens < seconds), 5 (per-file rationale), 7 (generic degrade).
+> **Slice 4 split PR-4/PR-5 (400-line budget).** PR-4 = WU-6 + WU-7 + WU-9 (gate doc) MERGED.
+> **PR-5 = WU-8 (Slice 4b) — COMPLETE** on branch `feat/m4-pr5-vibelens-pipeline`: VibeLensMcpAdapter
+> (display SINK per G2) + diff pipeline (`diff_pipeline.rs`, .git/-filtered, hash-dedup, in-flight
+> guard) + cooperative `spectty_diff` trigger + generic FileWatch + `get_diff_explanation` +
+> `diff_updated`. Green: fake-stdio contract + pipeline integration + cross-seam wire; all gates.
+> Exit criteria 4 (VibeLens < seconds), 5 (per-file rationale), 7 (generic degrade) — code in place,
+> manual acceptance is WU-11 (PR-6).
 
 ---
 

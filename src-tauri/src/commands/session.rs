@@ -26,6 +26,7 @@ use spectty_adapters::{
     StateFileReader, SystemClock,
 };
 use spectty_core::ports::agent_runner::LaunchContext;
+use spectty_core::ports::{DiffExplainerPort, FileChanged, FileWatchPort, GitPort};
 use spectty_core::{
     AgentSpec, AgentStatus, ClockPort, ProvisioningHandle, ProvisioningPort, ProvisioningScope,
     Session, SessionId, SessionRegistry, SessionSummary, WorkspaceId,
@@ -34,6 +35,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::spec::{hydrate_spec, spec_updated_from_change, SpecPersistence};
+use crate::diff_pipeline::{batch_should_trigger, DiffPipeline, DiffPipelines, DiffUpdated};
 use crate::pty_state::{PtyId, PtyRegistry, PtyState};
 use crate::session_runtime::{
     run_signal_loop, signal_channel, signal_try_send, StatusChanged, SIGNAL_CHANNEL_CAP,
@@ -457,6 +459,21 @@ pub(crate) fn remove_stale_tmp_files(runtime_dir: &str, session_id: &str) -> std
 ///    fires `status_changed`.
 /// 8: store the live PTY (with BOTH provisioning handles) in the `PtyRegistry`.
 /// 9: emit `session_created`.
+/// Run the shared diff pipeline ONCE and forward any emitted [`DiffUpdated`] to `emit`
+/// (M4 WU-8). Thin wrapper over [`DiffPipeline::run_once`](crate::diff_pipeline::DiffPipeline::run_once)
+/// so both trigger sites (the cooperative poll on a blocking task, the FileWatch callback on
+/// its debounce thread) share one call shape. The pipeline owns dedup + the in-flight guard,
+/// so a double-trigger is harmless; the outcome is intentionally ignored (degraded modes log
+/// inside the ports / adapter).
+fn run_pipeline_once(
+    pipeline: &DiffPipeline,
+    git: &dyn GitPort,
+    explainer: &dyn DiffExplainerPort,
+    mut emit: impl FnMut(DiffUpdated),
+) {
+    let _ = pipeline.run_once(git, explainer, &mut emit);
+}
+
 // Tauri injects each `State`/`Channel`/`AppHandle` as a separate command argument;
 // this IS the IPC command surface, so the argument count is unavoidable.
 #[allow(clippy::too_many_arguments)]
@@ -476,6 +493,10 @@ pub async fn spawn_session(
     hooks_prov: State<'_, HooksProvisionerState>,
     clock: State<'_, Arc<dyn ClockPort>>,
     persistence: State<'_, SpecPersistence>,
+    pipelines: State<'_, DiffPipelines>,
+    git: State<'_, Arc<dyn GitPort>>,
+    explainer: State<'_, Arc<dyn DiffExplainerPort>>,
+    watcher: State<'_, Arc<dyn FileWatchPort>>,
 ) -> Result<SessionId, String> {
     // Resolve provisioning scope once at the composition root (D18): Project when the
     // config is git-tracked, else Global. The real git probe lives in the adapter.
@@ -546,6 +567,19 @@ pub async fn spawn_session(
     // own it. The poll loop watches `spectty/{id}/spec`, deserializes each change into a
     // `SpecContract`, and emits `spec_updated`.
     let spec_port = persistence.0.clone();
+    // M4 WU-8 (D37): clone the diff ports + watcher + pipeline registry out of `State` so the
+    // read-thread-independent trigger loops can own them past this command frame.
+    let diff_git = git.inner().clone();
+    let diff_explainer = explainer.inner().clone();
+    let diff_watcher = watcher.inner().clone();
+    let diff_pipelines = pipelines.inner();
+    // Cooperative agents (emits_diff_signals == true) drive the pipeline via the
+    // `spectty_diff` trigger and do NOT get a file watcher; the Generic tier
+    // (emits_diff_signals == false) uses the debounced FileWatch fallback (D37).
+    let emits_diff_signals = runners
+        .resolve(&agent.kind)
+        .map(|r| r.descriptor().capabilities.emits_diff_signals)
+        .unwrap_or(false);
     finish_spawn_impl(
         outcome,
         sessions.inner(),
@@ -643,6 +677,86 @@ pub async fn spawn_session(
                 ));
             }
 
+            // M4 WU-8 (D37): the per-session VibeLens diff pipeline. ONE pipeline per session
+            // is shared by BOTH triggers (cooperative `spectty_diff` poll + generic FileWatch)
+            // so hash-dedup + the in-flight guard apply across both. Registered in
+            // `DiffPipelines` so `get_diff_explanation` can read its latest explanation and
+            // `close_session` can drop it.
+            let pipeline = Arc::new(DiffPipeline::new(id.0.clone(), workspace_path.clone()));
+            diff_pipelines.insert(pipeline.clone());
+
+            // The cooperative trigger: poll `spectty/{id}/diff` for a trigger doc the
+            // `spectty_diff` MCP effect upserts. On a change, run the pipeline immediately
+            // (bypassing the FileWatch debounce — D37). Reuses the SpecBus poll seam.
+            let diff_key = format!("spectty/{}/diff", id.0);
+            let (diff_shutdown_tx, diff_shutdown_rx) = tokio::sync::watch::channel(false);
+            {
+                let reader = Arc::new(PortPollReader::new(spec_port.clone()));
+                let bus = SpecBus::new(reader, diff_key.clone());
+                let trigger_pipeline = pipeline.clone();
+                let trigger_git = diff_git.clone();
+                let trigger_explainer = diff_explainer.clone();
+                let trigger_app = app.clone();
+                tokio::spawn(run_poll_loop(
+                    bus,
+                    poll_interval(),
+                    diff_shutdown_rx,
+                    move |_change| {
+                        // A cooperative `spectty_diff` arrived: run the shared pipeline. The
+                        // git read + VibeLens push are blocking, so run them on a blocking task
+                        // (this emit closure is called on the async poll task — see
+                        // run_poll_loop — so we must NOT block the runtime worker here).
+                        let pipe = trigger_pipeline.clone();
+                        let git = trigger_git.clone();
+                        let explainer = trigger_explainer.clone();
+                        let emit_app = trigger_app.clone();
+                        tokio::task::spawn_blocking(move || {
+                            run_pipeline_once(&pipe, git.as_ref(), explainer.as_ref(), |event| {
+                                let _ = emit_app.emit("diff_updated", event);
+                            });
+                        });
+                    },
+                ));
+            }
+
+            // The generic-tier trigger: a debounced file watcher on the workspace. Only for
+            // agents that do NOT emit cooperative signals (D37). The `.git/`-filtered callback
+            // runs the SAME shared pipeline (WU-8.0: exclude git's own index churn to avoid a
+            // self-trigger loop).
+            let diff_watch_guard = if emits_diff_signals {
+                None
+            } else {
+                let watch_pipeline = pipeline.clone();
+                let watch_git = diff_git.clone();
+                let watch_explainer = diff_explainer.clone();
+                let watch_app = app.clone();
+                let on_change = move |batch: FileChanged| {
+                    // Skip batches that are ONLY git-internal churn (WU-8.0).
+                    if !batch_should_trigger(&batch.paths) {
+                        return;
+                    }
+                    // This callback already runs on the watcher's own debounce thread (not a
+                    // Tokio worker), so the blocking git/VibeLens calls run synchronously here.
+                    let emit_app = watch_app.clone();
+                    run_pipeline_once(
+                        &watch_pipeline,
+                        watch_git.as_ref(),
+                        watch_explainer.as_ref(),
+                        |event| {
+                            let _ = emit_app.emit("diff_updated", event);
+                        },
+                    );
+                };
+                // A watch failure (e.g. the workspace path does not exist) is non-fatal: the
+                // session still works, just without the generic file-watch trigger.
+                diff_watcher
+                    .watch(
+                        std::path::PathBuf::from(&workspace_path),
+                        Box::new(on_change),
+                    )
+                    .ok()
+            };
+
             let state = PtyState {
                 transport: Box::new(adapter),
                 stop,
@@ -651,6 +765,8 @@ pub async fn spawn_session(
                 hooks_handle: hooks_handle_for_state,
                 state_file_path: state_file,
                 spec_poll_shutdown: Some(spec_shutdown_tx),
+                diff_poll_shutdown: Some(diff_shutdown_tx),
+                diff_watch_guard,
             };
             ptys.0
                 .lock()
@@ -682,7 +798,12 @@ pub async fn close_session(
     ptys: State<'_, PtyRegistry>,
     provisioner: State<'_, Arc<dyn ProvisioningPort>>,
     hooks_prov: State<'_, HooksProvisionerState>,
+    pipelines: State<'_, DiffPipelines>,
 ) -> Result<(), String> {
+    // M4 WU-8: drop the session's diff pipeline (its trigger loops are stopped by the
+    // PtyState shutdown below — the cooperative poll via its watch sender, the file watcher
+    // via its guard's Drop).
+    let _ = pipelines.remove(&id.0);
     // Remove the PTY state up-front so we can read BOTH provisioning handles AND own
     // the state for the kill closure; `shutdown` (kill child + join threads) runs
     // inside that closure so the kill-then-retract-then-delete-then-remove order holds.

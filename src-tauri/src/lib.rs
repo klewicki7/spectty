@@ -7,6 +7,7 @@
 //! dependency graph; session machinery proper arrives in later milestones.
 
 pub mod commands;
+pub mod diff_pipeline;
 pub mod pty_state;
 pub mod session_runtime;
 pub mod spec_bus;
@@ -15,12 +16,14 @@ use std::sync::Arc;
 
 use commands::session::HooksProvisionerState;
 use commands::spec::SpecPersistence;
+use diff_pipeline::DiffPipelines;
 use pty_state::PtyRegistry;
 use spectty_adapters::{
     AgentRunnerRegistry, ClaudeJsonProvisioner, ClaudeSettingsProvisioner, EngramAdapter,
-    HookCommandEntry, InMemoryPersistenceAdapter, McpServerEntry, RealConfigFile, SystemClock,
-    PERMISSION_PROMPT_MATCHER,
+    GitCliAdapter, HookCommandEntry, InMemoryPersistenceAdapter, McpServerEntry, NotifyFileWatcher,
+    RealConfigFile, SystemClock, VibeLensMcpAdapter, PERMISSION_PROMPT_MATCHER,
 };
+use spectty_core::ports::{DiffExplainerPort, FileWatchPort, GitPort};
 use spectty_core::{ClockPort, PersistencePort, ProvisioningPort, SessionRegistry};
 
 /// Resolve the path to the bundled `spectty-mcp` sidecar binary.
@@ -244,6 +247,16 @@ pub fn run() {
         Err(_) => Arc::new(InMemoryPersistenceAdapter::new()),
     };
 
+    // The VibeLens diff ports (M4 WU-8, D35/D36/D37). `GitCliAdapter` reads `git diff HEAD`
+    // (shell-git, empty-repo aware); `VibeLensMcpAdapter` BUILDS the explanation locally and
+    // PUSHES it to the VibeLens stdio child best-effort (G2: display SINK). Both are shared
+    // behind `Arc` across every session's diff pipeline.
+    let git: Arc<dyn GitPort> = Arc::new(GitCliAdapter::new());
+    let explainer: Arc<dyn DiffExplainerPort> = Arc::new(VibeLensMcpAdapter::new());
+    // The generic-tier file watcher (M4 WU-8, D35/D37): a debounced `NotifyFileWatcher`
+    // drives the diff pipeline for agents that do not emit cooperative `spectty_diff` signals.
+    let watcher: Arc<dyn FileWatchPort> = Arc::new(NotifyFileWatcher::new());
+
     tauri::Builder::default()
         .manage(PtyRegistry::default())
         // The Core `SessionRegistry` is the SOLE id minter (D13): both `pty_spawn` and
@@ -263,6 +276,13 @@ pub fn run() {
         // The living-spec persistence port (M4 WU-4) — read by `get_spec` and the
         // restart-hydrate path.
         .manage(SpecPersistence(persistence))
+        // The per-session VibeLens diff pipelines (M4 WU-8, D37) — registered by
+        // `spawn_session`, read by `get_diff_explanation`, removed by `close_session`.
+        .manage(DiffPipelines::default())
+        // The shared diff ports the pipeline runs through (M4 WU-8).
+        .manage(git)
+        .manage(explainer)
+        .manage(watcher)
         .invoke_handler(tauri::generate_handler![
             commands::ping::ping,
             commands::pty::pty_spawn,
@@ -274,6 +294,7 @@ pub fn run() {
             commands::session::list_sessions,
             commands::session::get_session,
             commands::spec::get_spec,
+            commands::spec::get_diff_explanation,
             commands::spec::approve_prompt,
         ])
         .run(tauri::generate_context!())

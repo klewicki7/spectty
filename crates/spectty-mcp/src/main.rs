@@ -193,8 +193,66 @@ fn handle_tools_call(params: Option<&Value>, engram: &dyn EngramClient) -> Resul
     match name {
         "spectty_spec" => spectty_spec_effect(arguments, engram),
         "spectty_approval" => spectty_approval_effect(arguments, engram),
+        "spectty_diff" => spectty_diff_effect(arguments, engram),
         // The remaining tools keep the benign stub ack (effects land in later slices).
         other => Ok(stub_ack(other)),
+    }
+}
+
+/// The `spectty_diff` EFFECT (M4 WU-8, D37/D29): the COOPERATIVE diff trigger. A cooperative
+/// agent calls this after it edits files; the effect upserts a trigger doc to
+/// `spectty/{session_id}/diff` and returns IMMEDIATELY (it does NOT run git or VibeLens — the
+/// app-side diff poll observes the trigger doc change and runs the pipeline, bypassing the
+/// FileWatch debounce for low latency). The `hint` (optional, advertised) is recorded so the
+/// app can attribute the trigger; a fresh nonce makes every call a genuine change the poll
+/// detects (the doc must differ each time, even for the same hint, so a rapid re-edit always
+/// re-triggers).
+///
+/// A malformed payload (missing `session_id`) is `-32602`. An engram transport failure
+/// degrades to a benign `isError` result — never a panic, so a down daemon does not break the
+/// agent's turn (spectty-diff-effect.md: "engram-down degrades isError").
+fn spectty_diff_effect(
+    arguments: Option<&Value>,
+    engram: &dyn EngramClient,
+) -> Result<Value, RpcError> {
+    let arguments = arguments.ok_or_else(|| RpcError::new(INVALID_PARAMS, "Missing arguments"))?;
+
+    let session_id = arguments
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, "spectty_diff: missing session_id"))?;
+
+    let topic_key = format!("spectty/{session_id}/diff");
+    // A monotonic-ish nonce so a back-to-back trigger for the SAME hint still changes the
+    // doc content (the app poll change-detects by content; an identical re-upsert would be
+    // a no-op and a rapid re-edit would be missed). System time in nanos is sufficient: the
+    // doc is a transient signal, not an ordering key.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let trigger = json!({
+        "session_id": session_id,
+        "hint": arguments.get("hint").and_then(Value::as_str),
+        "nonce": nonce.to_string(),
+    });
+
+    match engram.upsert(&topic_key, &trigger.to_string()) {
+        Ok(()) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("spectty_diff: triggered diff pipeline via {topic_key}")
+            }],
+            "isError": false
+        })),
+        Err(EngramClientError::Transport(msg)) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("spectty_diff: engram unavailable ({msg}); diff not triggered")
+            }],
+            "isError": true
+        })),
     }
 }
 
@@ -1056,10 +1114,11 @@ mod tests {
     /// seam — proving the dispatch only routed `spectty_spec` to an effect.
     #[test]
     fn non_spec_tools_keep_stub_ack() {
-        // `spectty_spec` (WU-4) and `spectty_approval` (WU-5) now have real effects; the
-        // remaining three keep the benign stub ack until their effects land.
+        // `spectty_spec` (WU-4), `spectty_approval` (WU-5), and `spectty_diff` (WU-8) now
+        // have real effects; the remaining two keep the benign stub ack until their effects
+        // land.
         let engram = FakeEngramClient::new();
-        for name in ["spectty_diff", "spectty_status", "spectty_cost"] {
+        for name in ["spectty_status", "spectty_cost"] {
             let req = format!(
                 r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"{name}","arguments":{{"session_id":"s"}}}}}}"#
             );
@@ -1067,6 +1126,111 @@ mod tests {
             assert_eq!(resp["result"]["isError"], false, "{name} must ack");
             assert!(engram.get("spectty/s/spec").is_none());
         }
+    }
+
+    // ── M4 WU-8: spectty_diff cooperative trigger ─────────────────────────────────────
+
+    /// WU-8.10: `spectty_diff` upserts a trigger doc to the canonical key
+    /// `spectty/{session_id}/diff` and returns immediately (non-error). The app-side poll
+    /// observes the change and runs the diff pipeline (bypassing the FileWatch debounce).
+    #[test]
+    fn spectty_diff_upserts_trigger_doc_to_canonical_key() {
+        let engram = FakeEngramClient::new();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                 "name":"spectty_diff",
+                 "arguments":{"session_id":"42","hint":"edited auth"}}}"#,
+            &engram,
+        );
+        assert!(
+            resp.get("error").is_none(),
+            "a valid call is not an RPC error"
+        );
+        assert_eq!(resp["result"]["isError"], false);
+
+        let stored = engram
+            .get("spectty/42/diff")
+            .expect("a trigger doc must be upserted under the canonical key");
+        let doc: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(doc["session_id"], "42");
+        assert_eq!(doc["hint"], "edited auth");
+        assert!(
+            doc["nonce"].as_str().is_some(),
+            "a nonce makes each trigger a detectable change for the app poll"
+        );
+    }
+
+    /// WU-8.10: a `spectty_diff` with no `hint` still triggers (hint is optional, advertised).
+    #[test]
+    fn spectty_diff_without_hint_still_triggers() {
+        let engram = FakeEngramClient::new();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                 "name":"spectty_diff","arguments":{"session_id":"7"}}}"#,
+            &engram,
+        );
+        assert_eq!(resp["result"]["isError"], false);
+        assert!(engram.get("spectty/7/diff").is_some());
+        // Only the addressed session's key is written.
+        assert!(engram.get("spectty/42/diff").is_none());
+    }
+
+    /// WU-8.10: a malformed `spectty_diff` (missing `session_id`) is `-32602` with no upsert.
+    #[test]
+    fn spectty_diff_malformed_payload_is_rejected() {
+        let engram = FakeEngramClient::new();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+                 "name":"spectty_diff","arguments":{}}}"#,
+            &engram,
+        );
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+    }
+
+    /// WU-8.10: when engram is unreachable the cooperative trigger DEGRADES to a benign
+    /// error result (`isError: true`) instead of panicking — a down daemon must not break
+    /// the agent's turn (spectty-diff-effect.md).
+    #[test]
+    fn spectty_diff_degrades_when_engram_down() {
+        let engram = FakeEngramClient::failing();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+                 "name":"spectty_diff","arguments":{"session_id":"42"}}}"#,
+            &engram,
+        );
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// PINNED CROSS-SEAM (MCP → app): the trigger doc the MCP `spectty_diff` effect writes
+    /// MUST be the shape the app-side diff poll consumes — a `session_id` plus a nonce that
+    /// changes per call so consecutive triggers are detectable changes. We replicate the app
+    /// side's change-detection (content differs ⇒ trigger) over two real MCP upserts to prove
+    /// the two-sided contract: a second trigger writes a DIFFERENT doc, so the app poll fires
+    /// again rather than deduping a genuine re-edit away.
+    #[test]
+    fn spectty_diff_consecutive_triggers_write_distinct_docs_for_app_poll() {
+        let engram = FakeEngramClient::new();
+        let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                 "name":"spectty_diff","arguments":{"session_id":"42","hint":"same hint"}}}"#;
+
+        response_with(req, &engram);
+        let first = engram.get("spectty/42/diff").expect("first trigger doc");
+        // A tiny gap so the nanos-nonce advances even on a fast machine.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        response_with(req, &engram);
+        let second = engram.get("spectty/42/diff").expect("second trigger doc");
+
+        // Both docs deserialize and carry the session id (the app-side shape).
+        let d1: Value = serde_json::from_str(&first).unwrap();
+        let d2: Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(d1["session_id"], "42");
+        assert_eq!(d2["session_id"], "42");
+        assert_ne!(
+            first, second,
+            "consecutive triggers for the SAME hint MUST differ so the app poll re-fires the \
+             pipeline on a rapid re-edit (the nonce guarantees change-detection)"
+        );
     }
 
     // ── M4 WU-5: spectty_approval blocking long-poll resolver ─────────────────────────
