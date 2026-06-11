@@ -215,24 +215,24 @@ scripted payloads + injected `emit` closure (mirrors `observe_and_diff` / M3 `ru
 > via injected `FnMut` closure ONLY on strictly-greater. SAME seam shape as `run_signal_loop`.
 > `serde_json` deserialization stays adapter-side. The loop owns no `AppHandle` (testable).
 
-- [ ] 2.1 RED: `spec_bus_emits_once_on_first_change` — Fake `PersistencePort` returns a payload
+- [x] 2.1 RED: `spec_bus_emits_once_on_first_change` — Fake `PersistencePort` returns a payload
   with `updated_at=1`; `last_updated_at=None` → poll invokes `emit(Change)` EXACTLY ONCE,
   advances `last_updated_at` to 1. `[M4-REQ-03]` `[unit][D28]`
-- [ ] 2.2 RED: `spec_bus_does_not_re_emit_same_updated_at` — poll twice with `updated_at=1`;
+- [x] 2.2 RED: `spec_bus_does_not_re_emit_same_updated_at` — poll twice with `updated_at=1`;
   second tick → NO emit. `[M4-REQ-03]` `[unit][D28]`
-- [ ] 2.3 RED: `spec_bus_re_emits_on_newer_updated_at` — after consuming `updated_at=1`, next
+- [x] 2.3 RED: `spec_bus_re_emits_on_newer_updated_at` — after consuming `updated_at=1`, next
   payload has `updated_at=2` → emit once more, advance to 2. `[M4-REQ-03]` `[unit][D28]`
-- [ ] 2.4 RED: `spec_bus_tolerates_poll_error` — Fake port returns `Err(Backend)` on a tick →
+- [x] 2.4 RED: `spec_bus_tolerates_poll_error` — Fake port returns `Err(Backend)` on a tick →
   loop logs + continues, does NOT emit, does NOT panic; next good tick resumes. `[M4-REQ-03]`
   `[unit][D28]`
-- [ ] 2.5 RED: `spec_bus_tolerates_absent_observation` — port returns `Ok(None)` (key not yet
+- [x] 2.5 RED: `spec_bus_tolerates_absent_observation` — port returns `Ok(None)` (key not yet
   written) → no emit, no error. `[M4-REQ-03]` `[unit]`
-- [ ] 2.6 GREEN: create `src-tauri/src/spec_bus.rs` (or `adapters`): `pub struct SpecBus {
+- [x] 2.6 GREEN: create `src-tauri/src/spec_bus.rs` (or `adapters`): `pub struct SpecBus {
   port: Arc<dyn PersistencePort>, topic_key: String, last_updated_at: Option<i64> }` with
   `pub fn poll(&mut self, emit: &mut dyn FnMut(Change))` (pure-testable; injected emit) and a
   `run_poll_loop` Tokio task wrapper (`interval(SPECTTY_POLL_MS default 2000)`). Deserialize
   `String → SpecContract` adapter-side via `serde_json`. `[M4-REQ-03]` `[unit][D27][D28]`
-- [ ] **Gate (WU-2)**: `cargo test --workspace` green (5 SpecBus unit tests); fmt/clippy clean;
+- [x] **Gate (WU-2)**: `cargo test --workspace` green (5 SpecBus unit tests); fmt/clippy clean;
   `cargo deny ... check bans` → `bans ok`.
 
 > **Slice 1 COMPLETE after WU-2.** PR-1 = WU-0 (gate doc) + WU-1 + WU-2 + W1 doc fix.

@@ -9,6 +9,7 @@
 pub mod commands;
 pub mod pty_state;
 pub mod session_runtime;
+pub mod spec_bus;
 
 use std::sync::Arc;
 
