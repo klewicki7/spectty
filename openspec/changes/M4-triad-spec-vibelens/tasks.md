@@ -364,29 +364,49 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > decision)` writes the decision into `ApprovalState` + upserts the resolved payload; the MCP
 > long-poll reads it → returns to the agent. Restart-survivable; spectty-mcp stays serde+http.
 
-- [ ] 5.1 RED: `spectty_approval_registers_pending_and_builds_quick_actions` — handler upserts a
+- [x] 5.1 RED: `spectty_approval_registers_pending_and_builds_quick_actions` — handler upserts a
   pending request keyed `(session_id, action_id)`; the app poll path maps it to
   `AwaitingInput + quick_actions` derived from `options[]`. `[M4-REQ-10]` `[unit][D31]`
-- [ ] 5.2 RED: `spectty_approval_duplicate_request_is_idempotent` — same `(session_id, action_id)`
+  > Implemented as `spectty_approval_registers_pending_with_options` (MCP, asserts the upserted
+  > pending doc carries `action_id`/`options`/null `resolution`). The `options→quick_actions`
+  > status-path mapping is the UI/poll concern landing in PR-6/WU-10; PR-3 pins the persisted
+  > shape `quick_actions` derive from.
+- [x] 5.2 RED: `spectty_approval_duplicate_request_is_idempotent` — same `(session_id, action_id)`
   upserted twice → single pending entry, no duplicate. `[M4-REQ-10]` `[unit][D31]`
-- [ ] 5.3 RED: `approve_prompt_resolves_and_unblocks_caller` — fake round-trip: `approve_prompt`
+- [x] 5.3 RED: `approve_prompt_resolves_and_unblocks_caller` — fake round-trip: `approve_prompt`
   writes `ApprovalState::Approved` + resolved payload; the blocked long-poll observes the
   resolution and returns; pending entry removed. `[M4-REQ-11]` `[unit][D31]`
-- [ ] 5.4 RED: `approve_prompt_unknown_key_is_no_op` — resolving an unknown `(session_id,
+  > Tauri `approve_prompt_resolves_and_unblocks_caller` (resolution observable on same key) +
+  > MCP `spectty_approval_long_poll_returns_resolution` (blocked long-poll reads it, returns
+  > decision to agent).
+- [x] 5.4 RED: `approve_prompt_unknown_key_is_no_op` — resolving an unknown `(session_id,
   action_id)` → no-op, no error/panic. `[M4-REQ-11]` `[unit][D31]`
-- [ ] 5.5 RED: `approve_prompt_writes_approval_state_via_core_gate` — decision flows through
+  > Plus `approve_prompt_already_resolved_is_no_op` (a stale/duplicate decision cannot clobber
+  > a resolved request).
+- [x] 5.5 RED: `approve_prompt_writes_approval_state_via_core_gate` — decision flows through
   `SpecContract`/`ApprovalState` (Core rule, never reimplemented). `[M4-REQ-07]` `[unit][D33]`
-- [ ] 5.6 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_approval` handler upserts to
+- [x] 5.6 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_approval` handler upserts to
   `spectty/{session_id}/approval` then bounded long-polls `get` (~500ms interval) for the
   resolution; returns the decision to the agent. serde+http only. `[M4-REQ-10][M4-REQ-11]`
   `[unit][D31]`
-- [ ] 5.7 GREEN: add `approve_prompt(session_id, action_id, decision)` command to
+  > `EngramClient` gained a `get`; `poll_for_resolution` (bounded by `SPECTTY_APPROVAL_MAX_POLLS`,
+  > interval `SPECTTY_APPROVAL_POLL_MS`) returns a `pending`/timeout result rather than hanging.
+  > Malformed payload → `-32602`; engram-down → benign `isError` degrade. `ReqwestEngramClient::get`
+  > mirrors the G1 client-side topic_key filter.
+- [x] 5.7 GREEN: add `approve_prompt(session_id, action_id, decision)` command to
   `src-tauri/src/commands/spec.rs` — writes `ApprovalState` via the Core gate, upserts the
   resolved payload to the same key; register in `generate_handler!`. App poll maps pending →
   EXISTING `status_changed(AwaitingInput, quick_actions)` (no new event). `[M4-REQ-10][M4-REQ-11]`
   `[unit][D29][D31]`
-- [ ] **Gate (WU-5)**: `cargo test --workspace` green (5 approval tests incl. long-poll resolve
+  > `ApprovalRequest` document + `resolve_approval_impl` (decision via Core `ApprovalState`,
+  > unknown/resolved key = no-op) + `ApprovalDecision` UI enum mapped onto `ApprovalState`.
+  > Registered in `lib.rs` `generate_handler!`. The pending→`status_changed` wiring is a UI/poll
+  > concern deferred to PR-6/WU-10 (the persisted pending shape it consumes is pinned here).
+- [x] **Gate (WU-5)**: `cargo test --workspace` green (5 approval tests incl. long-poll resolve
   integration); fmt/clippy clean; `cargo deny ... check bans` → `bans ok`.
+  > Tauri spec module +5 tests (76 lib total); MCP +7 tests (24 total). core 47 unchanged
+  > (Core quarantine intact — reused existing `ApprovalState`, no new Core dep). fmt clean,
+  > clippy -D warnings exit 0, deny bans ok, pnpm -C ui test 64 pass.
 
 > **Slice 3 COMPLETE after WU-5.** PR-3 = WU-5 (isolated). Green: gate unit tests + approval
 > long-poll resolve integration. Exit criterion 2 (plan-approval gate).

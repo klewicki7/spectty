@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use spectty_core::ports::{PersistenceError, PersistencePort};
-use spectty_core::SpecContract;
+use spectty_core::{ApprovalState, SpecContract};
 use tauri::State;
 
 use crate::spec_bus::Change;
@@ -100,6 +100,148 @@ pub fn hydrate_spec(port: &dyn PersistencePort, session_id: &str) -> Option<Spec
         session_id: session_id.to_string(),
         spec,
     })
+}
+
+// ── M4 WU-5: the plan-approval resolver (D31/D33) ──────────────────────────────────────
+//
+// `spectty_approval` (MCP side) upserts a pending request to `spectty/{session_id}/approval`
+// and long-polls the same key for a `resolution`. The `approve_prompt` command (here) writes
+// the user's decision THROUGH the Core [`ApprovalState`] gate and upserts the resolved
+// document so the blocked MCP caller unblocks. The document shape is byte-shared with the MCP
+// resolver (which cannot import Core — serde+http only, D16), so this struct and the MCP-side
+// struct MUST stay wire-compatible; the canonical-key helper and the `decision` enum encoding
+// are the contract surface.
+
+/// One pending-or-resolved approval request, persisted at `spectty/{session_id}/approval`
+/// (D31). `resolution == None` means PENDING (the agent's `spectty_approval` is blocked
+/// long-polling); a `Some` decision is the resolution the UI wrote via [`approve_prompt`].
+///
+/// The `decision` is encoded as a Core [`ApprovalState`] so the gate rule is never
+/// re-implemented (ADR-0007): the only decisions a real approval can carry are the
+/// non-`Pending` variants, but `ApprovalState`'s own serde keeps the wire string canonical
+/// and shared with the MCP resolver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    /// The action this approval gates, unique within the session — the `(session_id,
+    /// action_id)` pair is the resolver key (D31).
+    pub action_id: String,
+    /// Human-readable description of what is being approved (from the `spectty_approval`
+    /// arguments).
+    #[serde(default)]
+    pub description: String,
+    /// The agent-declared risk level (`low|medium|high`); free-form, surfaced to the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    /// The choices the UI offers; the status path derives `quick_actions` from these.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// The user's decision once resolved, or `None` while still pending. A resolved request
+    /// is removed from "pending" purely by this field becoming `Some`.
+    #[serde(default)]
+    pub resolution: Option<ApprovalState>,
+}
+
+impl ApprovalRequest {
+    /// `true` while the request is still awaiting the user (the agent is blocked).
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.resolution.is_none()
+    }
+}
+
+/// The canonical engram key for a session's approval document (D31/D5).
+#[must_use]
+pub fn approval_key(session_id: &str) -> String {
+    format!("spectty/{session_id}/approval")
+}
+
+/// Read the current [`ApprovalRequest`] for `session_id`, or `None` when none is stored or
+/// the stored blob does not deserialize (a corrupt blob degrades to "no request"). `Err`
+/// only on a backend transport failure.
+pub fn get_approval_impl(
+    port: &dyn PersistencePort,
+    session_id: &str,
+) -> Result<Option<ApprovalRequest>, PersistenceError> {
+    let Some(content) = port.get(&approval_key(session_id))? else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str::<ApprovalRequest>(&content).ok())
+}
+
+/// Resolve the pending approval for `(session_id, action_id)` with `decision` (the
+/// `approve_prompt` command body, D31/D33). The decision flows THROUGH the Core
+/// [`ApprovalState`] — the gate rule is never re-implemented here (ADR-0007).
+///
+/// Semantics (spec `spectty-approval.md` M4-REQ-11):
+/// - matching pending request → write `resolution = Some(decision)` back to the same key so
+///   the blocked MCP long-poll observes it, return `Ok(true)`;
+/// - unknown `(session_id, action_id)` (no request, or a different `action_id`, or already
+///   resolved) → NO-OP, no write, no error, return `Ok(false)`;
+/// - a backend transport failure → `Err` (the command surfaces it as a `String`).
+pub fn resolve_approval_impl(
+    port: &dyn PersistencePort,
+    session_id: &str,
+    action_id: &str,
+    decision: ApprovalState,
+) -> Result<bool, PersistenceError> {
+    let Some(mut request) = get_approval_impl(port, session_id)? else {
+        // No pending request for this session at all — no-op.
+        return Ok(false);
+    };
+    // Only the addressed, still-pending request resolves; anything else is a no-op so a
+    // stale/duplicate `approve_prompt` cannot clobber a different action or re-resolve.
+    if request.action_id != action_id || !request.is_pending() {
+        return Ok(false);
+    }
+    request.resolution = Some(decision);
+    let payload =
+        serde_json::to_string(&request).map_err(|e| PersistenceError::Backend(e.to_string()))?;
+    port.upsert(&approval_key(session_id), payload)?;
+    Ok(true)
+}
+
+/// The decision the UI sends from the plan-approval gate. A thin wire enum mapped onto the
+/// Core [`ApprovalState`] so the command boundary speaks the UI's vocabulary while the stored
+/// resolution stays the canonical Core state (ADR-0007).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    /// The user approved the plan — opens the edit gate.
+    Approve,
+    /// The user rejected the plan outright.
+    Reject,
+    /// The user wants changes (steering) before approving.
+    Adjust,
+}
+
+impl From<ApprovalDecision> for ApprovalState {
+    fn from(decision: ApprovalDecision) -> Self {
+        match decision {
+            ApprovalDecision::Approve => ApprovalState::Approved,
+            ApprovalDecision::Reject => ApprovalState::Rejected,
+            ApprovalDecision::Adjust => ApprovalState::Adjusted,
+        }
+    }
+}
+
+/// `approve_prompt(session_id, action_id, decision)` (D31): resolve the pending approval and
+/// unblock the agent's `spectty_approval` long-poll. An unknown key is a benign no-op
+/// (returns `false`); a backend failure surfaces as `Err(String)`. Thin shell over
+/// [`resolve_approval_impl`].
+#[tauri::command]
+pub fn approve_prompt(
+    session_id: String,
+    action_id: String,
+    decision: ApprovalDecision,
+    persistence: State<'_, SpecPersistence>,
+) -> Result<bool, String> {
+    resolve_approval_impl(
+        persistence.0.as_ref(),
+        &session_id,
+        &action_id,
+        decision.into(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -243,5 +385,140 @@ mod tests {
 
         // A session with no persisted spec hydrates to nothing (degrade to empty).
         assert!(hydrate_spec(port.as_ref(), "no-such").is_none());
+    }
+
+    // ── M4 WU-5: the plan-approval resolver (D31/D33) ─────────────────────────────────
+
+    fn pending_request(action_id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            action_id: action_id.to_string(),
+            description: "delete the prod database".to_string(),
+            risk_level: Some("high".to_string()),
+            options: vec!["approve".to_string(), "reject".to_string()],
+            resolution: None,
+        }
+    }
+
+    fn store_pending(port: &InMemoryPersistenceAdapter, session_id: &str, req: &ApprovalRequest) {
+        port.upsert(
+            &approval_key(session_id),
+            serde_json::to_string(req).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // WU-5.3: approve_prompt resolves a pending request and the resolution becomes observable
+    // to the (blocked) caller via the same key; the request is no longer pending.
+    #[test]
+    fn approve_prompt_resolves_and_unblocks_caller() {
+        let port = InMemoryPersistenceAdapter::new();
+        store_pending(&port, "42", &pending_request("edit-1"));
+
+        let resolved =
+            resolve_approval_impl(&port, "42", "edit-1", ApprovalState::Approved).unwrap();
+        assert!(resolved, "the matching pending request must resolve");
+
+        // The blocked caller observes the resolution on the same key.
+        let after = get_approval_impl(&port, "42")
+            .unwrap()
+            .expect("the document is still present, now resolved");
+        assert_eq!(after.resolution, Some(ApprovalState::Approved));
+        assert!(
+            !after.is_pending(),
+            "a resolved request is no longer pending"
+        );
+    }
+
+    // WU-5.4: approve_prompt for an unknown key (no request at all, or a different action_id)
+    // is a no-op — no write, no error, returns false.
+    #[test]
+    fn approve_prompt_unknown_key_is_no_op() {
+        let port = InMemoryPersistenceAdapter::new();
+
+        // No request stored at all.
+        assert!(!resolve_approval_impl(&port, "42", "ghost", ApprovalState::Approved).unwrap());
+        assert!(get_approval_impl(&port, "42").unwrap().is_none());
+
+        // A pending request exists, but for a DIFFERENT action_id → still a no-op, and the
+        // existing pending request is untouched.
+        store_pending(&port, "42", &pending_request("edit-1"));
+        assert!(!resolve_approval_impl(&port, "42", "ghost", ApprovalState::Approved).unwrap());
+        let still_pending = get_approval_impl(&port, "42").unwrap().unwrap();
+        assert!(
+            still_pending.is_pending(),
+            "resolving an unknown action_id must NOT touch the real pending request"
+        );
+    }
+
+    // WU-5.4 (triangulation): re-resolving an already-resolved request is a no-op (the
+    // decision is not clobbered by a stale/duplicate approve_prompt).
+    #[test]
+    fn approve_prompt_already_resolved_is_no_op() {
+        let port = InMemoryPersistenceAdapter::new();
+        store_pending(&port, "42", &pending_request("edit-1"));
+        assert!(resolve_approval_impl(&port, "42", "edit-1", ApprovalState::Approved).unwrap());
+
+        // A second decision must not overwrite the first (it is already resolved).
+        assert!(!resolve_approval_impl(&port, "42", "edit-1", ApprovalState::Rejected).unwrap());
+        let after = get_approval_impl(&port, "42").unwrap().unwrap();
+        assert_eq!(
+            after.resolution,
+            Some(ApprovalState::Approved),
+            "an already-resolved decision must be stable"
+        );
+    }
+
+    // WU-5.5: the decision flows THROUGH the Core ApprovalState (ADR-0007) — the UI's
+    // ApprovalDecision maps onto the canonical Core state that is persisted, never a
+    // re-implemented string.
+    #[test]
+    fn approve_prompt_writes_approval_state_via_core_gate() {
+        for (decision, expected) in [
+            (ApprovalDecision::Approve, ApprovalState::Approved),
+            (ApprovalDecision::Reject, ApprovalState::Rejected),
+            (ApprovalDecision::Adjust, ApprovalState::Adjusted),
+        ] {
+            let port = InMemoryPersistenceAdapter::new();
+            store_pending(&port, "42", &pending_request("edit-1"));
+
+            resolve_approval_impl(&port, "42", "edit-1", decision.into()).unwrap();
+            let after = get_approval_impl(&port, "42").unwrap().unwrap();
+            assert_eq!(
+                after.resolution,
+                Some(expected),
+                "{decision:?} must persist as the Core {expected:?} state"
+            );
+        }
+
+        // The gate predicate honours the resolved state: an Approved plan opens edits, a
+        // Rejected one does not — proving the resolution feeds the SAME Core rule the agent
+        // is gated on (no parallel approval vocabulary).
+        let approved = SpecContract {
+            intent: String::new(),
+            proposal: None,
+            tasks: Vec::new(),
+            progress: Vec::new(),
+            approval: ApprovalState::from(ApprovalDecision::Approve),
+            steering_notes: Vec::new(),
+            dev_override: false,
+        };
+        assert!(approved.may_begin_edits());
+        let rejected = SpecContract {
+            approval: ApprovalState::from(ApprovalDecision::Reject),
+            ..approved.clone()
+        };
+        assert!(!rejected.may_begin_edits());
+    }
+
+    // The persisted approval document round-trips and the canonical key is per-session.
+    #[test]
+    fn approval_request_round_trips_and_key_is_per_session() {
+        let req = pending_request("edit-1");
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ApprovalRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+
+        assert_eq!(approval_key("42"), "spectty/42/approval");
+        assert_eq!(approval_key("abc-7"), "spectty/abc-7/approval");
     }
 }

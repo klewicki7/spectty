@@ -274,6 +274,7 @@ pub fn run() {
             commands::session::list_sessions,
             commands::session::get_session,
             commands::spec::get_spec,
+            commands::spec::approve_prompt,
         ])
         .run(tauri::generate_context!())
         .expect("error while running spectty application");
