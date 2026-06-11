@@ -334,16 +334,28 @@ event on subsequent ticks. `detect_status` MUST NOT be modified (it stays pure P
 
 ### Requirement: Hook-sourced Observed events go through the same transition() authority  [unit]
 
-The `transition()` function (M2 Core, UNCHANGED) MUST remain the sole authority for
-`AgentStatus` advancement. An `Observed` derived from a hook event MUST be processed by
+The `transition()` function MUST remain the sole authority for `AgentStatus`
+advancement. An `Observed` derived from a hook event MUST be processed by
 `transition(current, observed)` identically to a scrape-derived `Observed`. No hook-specific
 bypass or short-circuit of the transition table is permitted.
 
-#### Scenario: Hook-derived Ready observation is rejected by transition if current is Starting  [unit]
+> **Amendment (acceptance, 2026-06-10, PR #32)**: M3 originally planned the M2 table
+> UNCHANGED except `(Running, Ready) => Idle`. The manual acceptance run additionally
+> ratified `(AwaitingInput, Ready) => Idle` (was `Running`): `Ready` means
+> quiet-at-prompt, and the old "input consumed, output resumed" reading was wrong —
+> resumption is observed as `Working`, never `Ready`. Justification and evidence in
+> acceptance.md §Acceptance gate and `docs/decisions/0004-agent-agnostic-core.md`.
+
+#### Scenario: Hook-derived Ready observation advances Starting to Idle  [unit]
 - **Given** `current = Starting` and the watcher emits `Observed::Ready` (from a hook event)
 - **When** `transition(Starting, Ready)` runs
-- **Then** it MUST return `Starting` unchanged (the M2 rule: Starting → Idle is the only legal
-  first step; the transition table is unmodified by M3)
+- **Then** it MUST return `Idle` (the M2 baseline rule `(Starting, Ready) => Idle`:
+  Starting → Idle is the only legal first step, and a hook-derived `Ready` takes it
+  identically to a scrape-derived one)
+- **Note (verify W1 correction, 2026-06-10)**: this scenario originally asserted
+  `Starting` unchanged, contradicting both the M2 baseline table (pinned by the core
+  test row `((Starting, Ready), Idle)`) and this spec's own prose. Spec-authoring bug —
+  the implementation was always correct; corrected during sdd-verify.
 
 #### Scenario: Hook-derived Working observation advances Running-ish states correctly  [unit]
 - **Given** `current = Idle` and the watcher emits `Observed::Working`
