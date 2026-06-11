@@ -48,7 +48,7 @@ dedicated resolver seam (D31). VibeLens is an MCP **client** (stdio subprocess �
 **Rationale**: Single mechanism (engram), no new transport, restart-survivable, keeps `spectty-mcp` serde+HTTP-client-only. Cost: approval latency = long-poll interval; acceptable for a human-in-the-loop gate. Isolated to Slice 3.
 
 ### D32 — Core entities `SpecContract` / `TaskState` / `ApprovalState` (pure, transition fns)
-**Choice**: New `crates/core/src/entities/spec.rs`. `SpecContract { intent: String, proposal: Option<String>, tasks: Vec<SpecTask>, progress: Vec<TaskProgress>, approval: ApprovalState, steering_notes: Vec<String> }`. `SpecTask { id, title, state: TaskState }`. `enum TaskState { Pending, InProgress, Done, Skipped }` with `fn transition(self, to: TaskState) -> Result<TaskState, SpecError>` enforcing one-way legal moves (Pending→InProgress→Done/Skipped; no backward). `enum ApprovalState { Pending, Approved, Rejected, Adjusted }`. All `serde + thiserror`, no I/O — mirrors `AgentStatus::transition`.
+**Choice**: New `crates/core/src/entities/spec.rs`. `SpecContract { intent: String, proposal: Option<String>, tasks: Vec<SpecTask>, progress: Vec<TaskProgress>, approval: ApprovalState, steering_notes: Vec<String> }`. `SpecTask { id, title, state: TaskState }`. `enum TaskState { Pending, InProgress, Done, Skipped }` with `fn transition(self, to: TaskState) -> TaskState` enforcing one-way legal moves (Pending→InProgress→Done/Skipped; no backward) — INFALLIBLE, an illegal move is ignored and returns `self` (see the PR-2 Amendment under D33). `enum ApprovalState { Pending, Approved, Rejected, Adjusted }`. All `serde + thiserror`, no I/O — mirrors `AgentStatus::transition`.
 **Alternatives**: anemic engram blob (loses testable invariants; contradicts ADR-0007).
 **Rationale**: Gate-before-edit and legal transitions become pure unit tests.
 
@@ -56,6 +56,9 @@ dedicated resolver seam (D31). VibeLens is an MCP **client** (stdio subprocess �
 **Choice**: `SpecContract::may_begin_edits(&self) -> bool` returns true only when `approval == Approved` (dev override = a constructor flag). `apply_progress(task_id, new_state)` returns `Err(SpecError::GateNotApproved)` if a task would move to `InProgress` while approval is `Pending`. The adapter/MCP layer reads this; it never re-implements the rule.
 **Alternatives**: gate enforced in src-tauri (rule leaks out of Core).
 **Rationale**: ADR-0007 frames the gate as domain logic; pure-testable.
+
+#### Amendment (PR-2 review) — `TaskState::transition` is INFALLIBLE
+The D32/D33 sketch typed `transition(self, to) -> Result<TaskState, SpecError>`, returning `Err(IllegalTransition)` on an illegal move. The binding spec scenarios (`specs/spec-contract.md` "done is terminal and rejects backward transition", `specs/spec.md`) instead mandate that an illegal move is **ignored, not an error — the task MUST remain done**, explicitly mirroring the infallible `AgentStatus::transition` (`_ => current`). The SPEC is authoritative, so the implemented signature is `transition(self, to: TaskState) -> TaskState`, returning `self` unchanged on an illegal move. Rationale: progress updates come from an EXTERNAL agent; an illegal move must degrade gracefully (stay put), not abort the update. Consequently `SpecError::IllegalTransition` is removed (no longer constructed), and `apply_progress` records a `TaskProgress` entry ONLY when the state actually changes (a no-op illegal move records nothing). The plan-approval gate is a SEPARATE concern and stays an error: `apply_progress` still returns `Err(SpecError::GateNotApproved)` on an unapproved `→ InProgress`, and `Err(SpecError::UnknownTask)` for an unknown id — gate/lookup violations ARE errors; task-state moves are not.
 
 ### D34 — `DiffExplanation` + `last_diff_hash` on the Session aggregate
 **Choice**: New `crates/core/src/entities/diff.rs`: `DiffExplanation { files: Vec<FileExplanation>, summary: String }` + `DiffExplanation::empty()`. Extend `Session` with `last_diff: Option<DiffExplanation>` and `last_diff_hash: Option<u64>`, plus `Session::update_diff(expl, hash)`. Hash = `DefaultHasher` over the diff string (std only).
@@ -130,7 +133,7 @@ dedicated resolver seam (D31). VibeLens is an MCP **client** (stdio subprocess �
 ```rust
 // crates/core/src/entities/spec.rs (pure)
 pub enum TaskState { Pending, InProgress, Done, Skipped }
-impl TaskState { pub fn transition(self, to: TaskState) -> Result<TaskState, SpecError>; }
+impl TaskState { pub fn transition(self, to: TaskState) -> TaskState; } // infallible (PR-2 amendment); illegal move ignored
 pub enum ApprovalState { Pending, Approved, Rejected, Adjusted }
 pub struct SpecContract { /* intent, proposal, tasks, progress, approval, steering_notes */ }
 impl SpecContract {

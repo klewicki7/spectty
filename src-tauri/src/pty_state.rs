@@ -48,6 +48,10 @@ pub struct PtyState {
     /// delete the file and its `.tmp` twin after the session ends (WU-8, D22). Empty
     /// string for Generic agents and for raw `pty_spawn` PTYs.
     pub state_file_path: String,
+    /// Shutdown sender for this session's `SpecBus` poll loop (M4 WU-4, D27/D28).
+    /// Sending `true` stops the Tokio `run_poll_loop` task at the next tick. `None` for
+    /// raw `pty_spawn` PTYs that have no spec pipeline. Fired by [`shutdown`](Self::shutdown).
+    pub spec_poll_shutdown: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl PtyState {
@@ -63,6 +67,10 @@ impl PtyState {
     pub fn shutdown(&mut self) {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
+        }
+        // Stop the spec poll loop (best-effort: a dropped receiver also stops the loop).
+        if let Some(tx) = &self.spec_poll_shutdown {
+            let _ = tx.send(true);
         }
         // Killing the child closes the slave; the master then reports EOF so a
         // read blocked in the dedicated thread returns and the loop exits.

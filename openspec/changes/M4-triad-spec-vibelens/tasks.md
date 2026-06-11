@@ -260,24 +260,24 @@ scripted payloads + injected `emit` closure (mirrors `observe_and_diff` / M3 `ru
 > no `serde_json` runtime dep (round-trip tests use the dev-dep). This is the testable
 > invariant surface: legal transitions + gate-before-edit become pure unit tests.
 
-- [ ] 3.1 RED: `task_state_transition_legal_table` — `Pending→InProgress→Done`,
+- [x] 3.1 RED: `task_state_transition_legal_table` — `Pending→InProgress→Done`,
   `Pending→InProgress→Skipped` succeed; `Done` is TERMINAL (any move out → `Err`); backward
   (`InProgress→Pending`, `Done→InProgress`) → `Err(SpecError)`; illegal jump
   (`Pending→Done`) → `Err`. RED proven by swapping a legal pair. `[M4-REQ-05]` `[unit][D32]`
-- [ ] 3.2 RED: `approval_state_default_is_pending` — a freshly submitted plan starts
+- [x] 3.2 RED: `approval_state_default_is_pending` — a freshly submitted plan starts
   `ApprovalState::Pending`; variants `Pending/Approved/Rejected/Adjusted` exist + serde round-trip.
   `[M4-REQ-06]` `[unit][D32]`
-- [ ] 3.3 RED: `spec_contract_serde_round_trips` — `SpecContract { intent, proposal, tasks,
+- [x] 3.3 RED: `spec_contract_serde_round_trips` — `SpecContract { intent, proposal, tasks,
   progress, approval, steering_notes }` survives serialize → deserialize byte-stable (pure).
   `[M4-REQ-04]` `[unit][D32]`
-- [ ] 3.4 RED: `may_begin_edits_true_only_when_approved` — `may_begin_edits()` returns `true`
+- [x] 3.4 RED: `may_begin_edits_true_only_when_approved` — `may_begin_edits()` returns `true`
   ONLY when `approval == Approved`; `Pending/Rejected/Adjusted` → `false`. Dev-override
   constructor flag is representable, NOT the default, and distinguishable from a real approval.
   `[M4-REQ-07]` `[unit][D33]`
-- [ ] 3.5 RED: `apply_progress_blocks_in_progress_while_pending` — `apply_progress(task_id,
+- [x] 3.5 RED: `apply_progress_blocks_in_progress_while_pending` — `apply_progress(task_id,
   InProgress)` while `approval == Pending` → `Err(SpecError::GateNotApproved)`; same call after
   `Approved` → `Ok`. `[M4-REQ-07]` `[unit][D33]`
-- [ ] 3.6 GREEN: create `crates/core/src/entities/spec.rs` — `enum TaskState { Pending,
+- [x] 3.6 GREEN: create `crates/core/src/entities/spec.rs` — `enum TaskState { Pending,
   InProgress, Done, Skipped }` + `fn transition(self, to: TaskState) -> Result<TaskState,
   SpecError>` (one-way); `enum ApprovalState { Pending, Approved, Rejected, Adjusted }`;
   `struct SpecTask { id, title, state: TaskState }`; `struct SpecContract { intent: String,
@@ -286,8 +286,8 @@ scripted payloads + injected `emit` closure (mirrors `observe_and_diff` / M3 `ru
   -> bool`; `fn apply_progress(&mut self, task_id: &str, to: TaskState) -> Result<(), SpecError>`;
   `enum SpecError` (thiserror, incl. `GateNotApproved`). `serde + thiserror` ONLY.
   `[M4-REQ-04][M4-REQ-05][M4-REQ-06][M4-REQ-07]` `[unit][ci][D32][D33]`
-- [ ] 3.7 GREEN: export from `crates/core/src/entities/mod.rs` + re-export at Core `lib.rs`. `[ci]`
-- [ ] **Gate (WU-3)**: `cargo test --workspace` green (5 pure entity tests); fmt/clippy clean;
+- [x] 3.7 GREEN: export from `crates/core/src/entities/mod.rs` + re-export at Core `lib.rs`. `[ci]`
+- [x] **Gate (WU-3)**: `cargo test --workspace` green (5 pure entity tests); fmt/clippy clean;
   `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok` (Core gained ONLY
   `serde + thiserror` types — M4-REQ-04/ci). **This is the load-bearing Core-quarantine WU.**
 
@@ -316,31 +316,31 @@ emits, no `AppHandle`) + restart-hydrate FIRST.
 > session ids are wired, the `"spectty"` stopgap in `engram_session_id` should be unreachable for
 > canonical `spectty/{sid}/{spec|progress|cost}` keys (a `debug_assert` + test already pin this).
 
-- [ ] 4.1 RED: `spectty_mcp_tools_list_schema_is_byte_frozen` — assert `tools/list` output for
+- [x] 4.1 RED: `spectty_mcp_tools_list_schema_is_byte_frozen` — assert `tools/list` output for
   the 5 tools is byte-for-byte identical to the M3-frozen schema fixture; only `tools/call`
   effects change. RED proven by mutating a description. `[M4-REQ-08]` `[unit][ci][D16]`
-- [ ] 4.2 RED: `spectty_spec_upserts_canonical_key_and_returns_immediately` — fake engram HTTP
+- [x] 4.2 RED: `spectty_spec_upserts_canonical_key_and_returns_immediately` — fake engram HTTP
   client; `spectty_spec` payload → upsert to `spectty/{session_id}/spec`, returns without
   blocking. Malformed payload → rejected, no crash. `[M4-REQ-09]` `[unit][D5]`
-- [ ] 4.3 RED: `poll_change_emits_spec_updated_once` — integration: SpecBus over Fake port
+- [x] 4.3 RED: `poll_change_emits_spec_updated_once` — integration: SpecBus over Fake port
   scripted with one spec change → collected emits contain EXACTLY ONE `spec_updated` with the
   deserialized `SpecContract`. `[M4-REQ-09][M4-REQ-17]` `[unit][D29]`
-- [ ] 4.4 RED: `restart_hydrate_emits_initial_spec_updated` — re-attach path does ONE
+- [x] 4.4 RED: `restart_hydrate_emits_initial_spec_updated` — re-attach path does ONE
   `get(spectty/{sid}/spec)` (+ `.../progress`), reconstructs `SpecContract`, emits initial
   `spec_updated`; engram-down → degrades to empty/last-known, NO crash. `[M4-REQ-23]`
   `[unit][D38]`
-- [ ] 4.5 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_spec` `tools/call` handler
+- [x] 4.5 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_spec` `tools/call` handler
   builds the `SpecContract` JSON and POST-upserts via a new serde+http engram client to
   `spectty/{session_id}/spec`; returns immediately. Schema (`tools/list`) UNTOUCHED.
   `[M4-REQ-08][M4-REQ-09]` `[unit][D16]`
-- [ ] 4.6 GREEN: create `src-tauri/src/commands/spec.rs` — `get_spec(id) -> Option<SpecContract>`
+- [x] 4.6 GREEN: create `src-tauri/src/commands/spec.rs` — `get_spec(id) -> Option<SpecContract>`
   command; register in `generate_handler!`. Add `spec_updated` event emission inside the SpecBus
   injected-emit closure (v2 `Emitter`), emit ONLY on actual change. `[M4-REQ-16][M4-REQ-17]`
   `[unit][D29]`
-- [ ] 4.7 GREEN: wire restart hydrate in `src-tauri/src/commands/session.rs` — on spawn/re-attach,
+- [x] 4.7 GREEN: wire restart hydrate in `src-tauri/src/commands/session.rs` — on spawn/re-attach,
   before starting the poll interval, ONE `get` per spec/progress key → emit initial
   `spec_updated`. `[M4-REQ-23]` `[unit][D38]`
-- [ ] **Gate (WU-4)**: `cargo test --workspace` green (frozen-schema + 3 integration/effect tests);
+- [x] **Gate (WU-4)**: `cargo test --workspace` green (frozen-schema + 3 integration/effect tests);
   fmt/clippy clean; `cargo deny ... check bans` → `bans ok` (spectty-mcp stays serde+http only).
 
 > **Slice 2 COMPLETE after WU-4.** PR-2 = WU-3 + WU-4. Green: pure entity unit tests +

@@ -14,12 +14,14 @@ pub mod spec_bus;
 use std::sync::Arc;
 
 use commands::session::HooksProvisionerState;
+use commands::spec::SpecPersistence;
 use pty_state::PtyRegistry;
 use spectty_adapters::{
-    AgentRunnerRegistry, ClaudeJsonProvisioner, ClaudeSettingsProvisioner, HookCommandEntry,
-    McpServerEntry, RealConfigFile, SystemClock, PERMISSION_PROMPT_MATCHER,
+    AgentRunnerRegistry, ClaudeJsonProvisioner, ClaudeSettingsProvisioner, EngramAdapter,
+    HookCommandEntry, InMemoryPersistenceAdapter, McpServerEntry, RealConfigFile, SystemClock,
+    PERMISSION_PROMPT_MATCHER,
 };
-use spectty_core::{ClockPort, ProvisioningPort, SessionRegistry};
+use spectty_core::{ClockPort, PersistencePort, ProvisioningPort, SessionRegistry};
 
 /// Resolve the path to the bundled `spectty-mcp` sidecar binary.
 ///
@@ -232,6 +234,16 @@ pub fn run() {
     ));
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
 
+    // The persistence port the living-spec pipeline reads through (M4 WU-4, D26). The
+    // real `EngramAdapter` talks to the local engram daemon on :7437; if its dedicated
+    // runtime cannot be built we degrade to an in-memory adapter so the app still starts
+    // (the spec pane simply shows nothing until engram is reachable). Reads degrade per
+    // call when the daemon is down — never a startup crash.
+    let persistence: Arc<dyn PersistencePort> = match EngramAdapter::new("spectty") {
+        Ok(adapter) => Arc::new(adapter),
+        Err(_) => Arc::new(InMemoryPersistenceAdapter::new()),
+    };
+
     tauri::Builder::default()
         .manage(PtyRegistry::default())
         // The Core `SessionRegistry` is the SOLE id minter (D13): both `pty_spawn` and
@@ -248,6 +260,9 @@ pub fn run() {
         // The hooks provisioner as `HooksProvisionerState` (distinct state type — D21).
         .manage(HooksProvisionerState(hooks_provisioner))
         .manage(clock)
+        // The living-spec persistence port (M4 WU-4) — read by `get_spec` and the
+        // restart-hydrate path.
+        .manage(SpecPersistence(persistence))
         .invoke_handler(tauri::generate_handler![
             commands::ping::ping,
             commands::pty::pty_spawn,
@@ -258,6 +273,7 @@ pub fn run() {
             commands::session::close_session,
             commands::session::list_sessions,
             commands::session::get_session,
+            commands::spec::get_spec,
         ])
         .run(tauri::generate_context!())
         .expect("error while running spectty application");
