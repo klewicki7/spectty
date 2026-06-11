@@ -1257,6 +1257,39 @@ mod tests {
         assert_eq!(resolution_of("{not json", "edit-1"), None);
     }
 
+    /// PR-3 Finding 1 (MAJOR), MIRROR direction of the cross-seam contract. The Tauri
+    /// `approve_prompt` serializes an `ApprovalRequest` with a `resolution` set to a canonical
+    /// Core `ApprovalState` string. We replicate that EXACT Tauri-serialized resolved document
+    /// as a JSON literal (src-tauri/src/commands/spec.rs `ApprovalRequest` serde shape —
+    /// `risk_level` is `skip_serializing_if = "Option::is_none"`, so a resolved doc may OMIT
+    /// it) and feed it into the REAL `resolution_of` parser. This proves the MCP long-poll
+    /// unblocks on what the app actually writes — the seam the PR-2 blocker class missed.
+    #[test]
+    fn tauri_resolved_doc_unblocks_the_mcp_long_poll() {
+        // EXACT shape the Tauri ApprovalRequest serializes once resolved (Approved). Note the
+        // omitted `risk_level` (skip_serializing_if) and the bare Core ApprovalState string.
+        let tauri_resolved_approved = r#"{"action_id":"edit-1","description":"delete the prod database","options":["approve","reject"],"resolution":"Approved"}"#;
+        assert_eq!(
+            resolution_of(tauri_resolved_approved, "edit-1").as_deref(),
+            Some("Approved"),
+            "the MCP long-poll MUST unblock on the Tauri-serialized resolved doc"
+        );
+        // The same doc is invisible under a different action_id (no false unblock).
+        assert_eq!(resolution_of(tauri_resolved_approved, "other"), None);
+
+        // The Adjusted variant must also unblock the long-poll with the canonical string.
+        let tauri_resolved_adjusted = r#"{"action_id":"plan-1","description":"steer the plan","options":["adjust"],"resolution":"Adjusted"}"#;
+        assert_eq!(
+            resolution_of(tauri_resolved_adjusted, "plan-1").as_deref(),
+            Some("Adjusted"),
+            "the MCP long-poll MUST unblock on an Adjusted resolution"
+        );
+
+        // A still-pending Tauri doc (resolution:null, risk_level present) keeps the poll blocked.
+        let tauri_pending = r#"{"action_id":"edit-1","description":"d","risk_level":"high","options":[],"resolution":null}"#;
+        assert_eq!(resolution_of(tauri_pending, "edit-1"), None);
+    }
+
     /// The byte-frozen `tools/list` schema fixture (M3-swap contract). If a deliberate
     /// schema change is ever ratified, this fixture and the spec must be updated together.
     const FROZEN_TOOLS_SCHEMA: &str = r#"[

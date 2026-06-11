@@ -521,4 +521,117 @@ mod tests {
         assert_eq!(approval_key("42"), "spectty/42/approval");
         assert_eq!(approval_key("abc-7"), "spectty/abc-7/approval");
     }
+
+    // ── PR-3 Finding 1 (MAJOR): the CROSS-SEAM wire contract ───────────────────────────
+    //
+    // The PR-2 blocker class was a two-sided JSON contract where each side only tested its
+    // OWN serialization. Here the Tauri side owns BOTH shapes via JSON literals: we replicate
+    // the EXACT pending document the MCP `spectty_approval_effect` writes (main.rs:291-297),
+    // deserialize it into `ApprovalRequest`, resolve it through `resolve_approval_impl`, and
+    // assert the serialized resolved document satisfies the MCP-side parser's contract
+    // (`resolution_of`: a non-null `"resolution"` string matching the `action_id`). This is
+    // the seam that actually breaks in production if either side drifts.
+
+    /// Replicate, verbatim, the pending document the MCP effect upserts (crates/spectty-mcp/
+    /// src/main.rs:291-297): `action_id`, a `description`, a NULLABLE `risk_level`, the
+    /// `options[]`, and `resolution: null`. Copied as a JSON literal (not the Rust struct) so
+    /// the test fails if the MCP wire shape and `ApprovalRequest` ever diverge.
+    fn mcp_pending_doc_literal(action_id: &str) -> String {
+        serde_json::json!({
+            "action_id": action_id,
+            "description": "delete the prod database",
+            "risk_level": "high",
+            "options": ["approve", "reject", "adjust"],
+            "resolution": serde_json::Value::Null,
+        })
+        .to_string()
+    }
+
+    /// Mirror of the MCP-side `resolution_of` contract (crates/spectty-mcp/src/main.rs:381):
+    /// the resolved document MUST carry a non-null `"resolution"` string for the addressed
+    /// `action_id`, or the blocked long-poll never unblocks. We replicate it here because the
+    /// MCP crate cannot be a dev-dependency of src-tauri; the mirror MCP-side test
+    /// (`tauri_resolved_doc_unblocks_the_mcp_long_poll`) feeds a Tauri-serialized literal into
+    /// the REAL `resolution_of` to close the loop.
+    fn mcp_resolution_of(content: &str, action_id: &str) -> Option<String> {
+        let doc: serde_json::Value = serde_json::from_str(content).ok()?;
+        if doc.get("action_id").and_then(serde_json::Value::as_str) != Some(action_id) {
+            return None;
+        }
+        let resolution = doc.get("resolution")?;
+        if resolution.is_null() {
+            return None;
+        }
+        resolution.as_str().map(str::to_string)
+    }
+
+    // Finding 1 (MAJOR): the MCP-written pending doc, resolved on the Tauri side, MUST produce
+    // a document the MCP `resolution_of` parser accepts — proving the two-sided contract holds
+    // end to end (Approved direction).
+    #[test]
+    fn mcp_pending_doc_resolved_by_tauri_satisfies_the_mcp_parser() {
+        let port = InMemoryPersistenceAdapter::new();
+
+        // Store the EXACT pending document the MCP effect wrote (not a Rust-built struct).
+        port.upsert(&approval_key("42"), mcp_pending_doc_literal("edit-1"))
+            .unwrap();
+
+        // The MCP-written literal MUST deserialize into the Tauri `ApprovalRequest`.
+        let parsed = get_approval_impl(&port, "42")
+            .unwrap()
+            .expect("the MCP pending wire doc MUST deserialize into ApprovalRequest");
+        assert!(
+            parsed.is_pending(),
+            "the MCP doc is pending (resolution:null)"
+        );
+        assert_eq!(parsed.action_id, "edit-1");
+        assert_eq!(parsed.risk_level.as_deref(), Some("high"));
+        assert_eq!(parsed.options.len(), 3);
+
+        // Resolve via the real command path (Approve).
+        let resolved =
+            resolve_approval_impl(&port, "42", "edit-1", ApprovalDecision::Approve.into()).unwrap();
+        assert!(resolved, "the matching MCP request must resolve");
+
+        // Serialize the resolved request EXACTLY as the command does, then assert the MCP
+        // parser accepts it — contains `"resolution":"Approved"` for the matching action_id.
+        let resolved_wire =
+            serde_json::to_string(&get_approval_impl(&port, "42").unwrap().unwrap()).unwrap();
+        assert!(
+            resolved_wire.contains(r#""resolution":"Approved""#),
+            "the resolved wire doc MUST carry the canonical Core decision: {resolved_wire}"
+        );
+        assert_eq!(
+            mcp_resolution_of(&resolved_wire, "edit-1").as_deref(),
+            Some("Approved"),
+            "the MCP-side parser MUST extract the decision the Tauri side wrote"
+        );
+        // A resolution under the wrong action_id is invisible to the long-poll (no false unblock).
+        assert_eq!(mcp_resolution_of(&resolved_wire, "other"), None);
+    }
+
+    // Finding 1 (MAJOR), Adjusted + steering direction: the Adjust decision must also survive
+    // the cross-seam round-trip and remain readable by the MCP parser as "Adjusted".
+    #[test]
+    fn mcp_pending_doc_resolved_adjusted_survives_the_seam() {
+        let port = InMemoryPersistenceAdapter::new();
+        port.upsert(&approval_key("7"), mcp_pending_doc_literal("plan-1"))
+            .unwrap();
+
+        let resolved =
+            resolve_approval_impl(&port, "7", "plan-1", ApprovalDecision::Adjust.into()).unwrap();
+        assert!(resolved);
+
+        let resolved_wire =
+            serde_json::to_string(&get_approval_impl(&port, "7").unwrap().unwrap()).unwrap();
+        assert!(
+            resolved_wire.contains(r#""resolution":"Adjusted""#),
+            "Adjust must persist as the canonical Core Adjusted state: {resolved_wire}"
+        );
+        assert_eq!(
+            mcp_resolution_of(&resolved_wire, "plan-1").as_deref(),
+            Some("Adjusted"),
+            "the MCP parser MUST read back the Adjusted decision"
+        );
+    }
 }
