@@ -191,6 +191,43 @@ mod tests {
         assert_eq!(get_spec_impl(&port, "99").unwrap(), None);
     }
 
+    // Finding 1 (BLOCKER) wire-path: the EXACT seam the review proved broken. A
+    // schema-faithful agent payload (`status`, no `intent`) is serialized by the MCP
+    // effect (`spec.to_string()` on the parsed agent `Value`), stored as the engram
+    // content string, and MUST deserialize back into a `SpecContract` on the app side —
+    // both through the poll-change seam (`spec_updated_from_change`) and the on-demand
+    // read (`get_spec_impl`). Before the `#[serde(rename = "status")]` + `intent` default
+    // fix, this deserialize returned None and the spec was silently dropped.
+    #[test]
+    fn schema_faithful_agent_payload_survives_the_mcp_to_core_wire_path() {
+        // What a compliant agent sends as the `spec` argument of a `spectty_spec` call.
+        let agent_spec = serde_json::json!({
+            "tasks": [
+                { "id": "t1", "title": "write the test", "status": "pending" },
+                { "id": "t2", "title": "make it green", "status": "in_progress" }
+            ]
+        });
+        // The MCP effect upserts `spec.to_string()` verbatim (main.rs:227) — reproduce it.
+        let wire_content = agent_spec.to_string();
+
+        // Poll-change seam: a canonical change carrying that wire content MUST emit.
+        let event = spec_updated_from_change(&change("spectty/42/spec", &wire_content))
+            .expect("schema-faithful agent payload MUST survive the MCP→Core wire path");
+        assert_eq!(event.session_id, "42");
+        assert_eq!(event.spec.tasks.len(), 2);
+        assert_eq!(event.spec.tasks[0].state, TaskState::Pending);
+        assert_eq!(event.spec.tasks[1].state, TaskState::InProgress);
+        assert_eq!(event.spec.intent, "", "absent intent defaults to empty");
+
+        // On-demand read seam: the same stored wire content reads back as a contract.
+        let port = InMemoryPersistenceAdapter::new();
+        port.upsert("spectty/42/spec", wire_content).unwrap();
+        let read = get_spec_impl(&port, "42")
+            .unwrap()
+            .expect("a stored schema-faithful payload MUST read back as a contract");
+        assert_eq!(read.tasks[1].state, TaskState::InProgress);
+    }
+
     // WU-4.4: restart hydrate reconstructs the initial spec_updated from the persisted
     // key; absent → None (degrade to empty, no crash).
     #[test]

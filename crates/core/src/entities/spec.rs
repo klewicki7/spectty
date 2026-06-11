@@ -96,7 +96,11 @@ pub struct SpecTask {
     pub id: String,
     /// Human-readable task title.
     pub title: String,
-    /// Current lifecycle state.
+    /// Current lifecycle state. The FROZEN MCP schema and the spec deltas mandate the wire
+    /// field name `status`; Core keeps the idiomatic field name `state` and renames on the
+    /// wire so schema-faithful agent payloads deserialize and serialization stays
+    /// schema-authoritative (Finding 1, PR-2 review).
+    #[serde(rename = "status")]
     pub state: TaskState,
     /// Optional free-form notes the agent attaches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,7 +125,10 @@ pub struct TaskProgress {
 /// is the Core business rule (ADR-0007) adapters read but never re-implement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecContract {
-    /// The one-line intent / goal of the plan.
+    /// The one-line intent / goal of the plan. The FROZEN MCP schema does NOT list `intent`
+    /// as required on its `spec` object, so a schema-valid payload may omit it; Core
+    /// defaults it to the empty string rather than failing to deserialize (Finding 1).
+    #[serde(default)]
     pub intent: String,
     /// The full proposal prose, if the agent supplied one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,6 +369,60 @@ mod tests {
         assert_eq!(approved.progress.len(), 1);
         assert_eq!(approved.progress[0].task_id, "t1");
         assert_eq!(approved.progress[0].state, TaskState::InProgress);
+    }
+
+    // Finding 1 (BLOCKER): the FROZEN MCP schema and the spec deltas mandate the wire
+    // field name `status` for a task's lifecycle state. A schema-faithful payload MUST
+    // deserialize into a `SpecContract`; before the `#[serde(rename = "status")]` fix it
+    // silently failed (None → spec dropped). Also: the schema's `spec` object does NOT
+    // require `intent`, so an intent-less but schema-valid payload MUST still deserialize
+    // (Core's `intent` is `#[serde(default)]`).
+    #[test]
+    fn schema_faithful_payload_deserializes_with_status_field() {
+        // Exactly the shape a compliant agent emits per the frozen schema.
+        let payload = r#"{"tasks":[{"id":"t1","title":"t","status":"pending"}]}"#;
+        let contract: SpecContract =
+            serde_json::from_str(payload).expect("a schema-faithful payload MUST deserialize");
+
+        assert_eq!(contract.tasks.len(), 1);
+        assert_eq!(contract.tasks[0].id, "t1");
+        assert_eq!(
+            contract.tasks[0].state,
+            TaskState::Pending,
+            "the wire field `status` MUST map onto the Core `state` field"
+        );
+        // The schema does not require `intent`; an absent one defaults to empty.
+        assert_eq!(
+            contract.intent, "",
+            "an intent-less but schema-valid payload MUST deserialize (intent defaults to \"\")"
+        );
+    }
+
+    // Triangulation: each enum variant must round-trip through the `status` wire name.
+    #[test]
+    fn task_status_wire_name_round_trips_all_variants() {
+        for (variant, wire) in [
+            (TaskState::Pending, "pending"),
+            (TaskState::InProgress, "in_progress"),
+            (TaskState::Done, "done"),
+            (TaskState::Skipped, "skipped"),
+        ] {
+            let payload = format!(r#"{{"tasks":[{{"id":"t","title":"t","status":"{wire}"}}]}}"#);
+            let contract: SpecContract =
+                serde_json::from_str(&payload).expect("schema-faithful payload");
+            assert_eq!(contract.tasks[0].state, variant);
+
+            // Serializing back MUST emit `status`, not `state` (schema stays authoritative).
+            let json = serde_json::to_string(&contract.tasks[0]).expect("serialize task");
+            assert!(
+                json.contains(&format!(r#""status":"{wire}""#)),
+                "SpecTask MUST serialize the lifecycle field as `status`, got: {json}"
+            );
+            assert!(
+                !json.contains(r#""state""#),
+                "SpecTask MUST NOT serialize a `state` field (schema mandates `status`): {json}"
+            );
+        }
     }
 
     // Triangulation for apply_progress: an unknown task id is a distinct error, and an
