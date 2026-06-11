@@ -146,6 +146,71 @@ pub fn poll_interval() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// The async/Tokio-side seam (M4-REQ-03: the seam MUST be async/Tokio-side). Drives a
+/// [`SpecBus`] on a [`tokio::time::interval`] cadence until `shutdown` fires, invoking
+/// `emit` on every actual [`Change`]. Mirrors how `session_runtime::run_signal_loop`
+/// owns a per-session loop with an injected emit closure and an external lifecycle.
+///
+/// ## Why `spawn_blocking`
+///
+/// The production [`PollReader`] is backed by `ReqwestEngramHttp`, whose sync trait
+/// methods `block_on` their OWN dedicated runtime. Calling that DIRECTLY from a Tokio
+/// worker thread would panic ("Cannot start a runtime from within a runtime"). So each
+/// tick runs the sync poll step inside [`tokio::task::spawn_blocking`]: the bus is moved
+/// into the blocking task, polled, and moved back out with the changes it produced. The
+/// async side then fans those changes out to `emit`. This keeps the runtime worker free
+/// and is correct for both the blocking HTTP reader and the in-memory port reader.
+///
+/// ## Shutdown
+///
+/// `shutdown` is a [`tokio::sync::watch::Receiver<bool>`]; sending `true` (or dropping
+/// the sender) stops the loop at the next tick boundary, so session close / app shutdown
+/// can cleanly terminate the task — mirroring `run_signal_loop`'s EOF-driven exit.
+///
+/// Production wiring of real sessions onto this loop is deferred to WU-4; this wrapper
+/// exists and is exercised by tests so the M4-REQ-03 async seam is real, not implied.
+pub async fn run_poll_loop(
+    mut bus: SpecBus,
+    interval: Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut emit: impl FnMut(Change),
+) {
+    // If shutdown was already requested before the first tick, do nothing.
+    if *shutdown.borrow() {
+        return;
+    }
+    let mut ticker = tokio::time::interval(interval);
+    // Skip missed ticks rather than bursting — a slow poll must not queue a backlog.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            // Stop promptly when shutdown flips to true (or the sender is dropped).
+            res = shutdown.changed() => {
+                // `Ok(())` => value changed; `Err(_)` => sender dropped. Either is a stop.
+                if res.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                // Run the SYNC poll step off the runtime worker (see rustdoc). Move the
+                // bus in, collect changes, move the bus back out.
+                let (returned_bus, changes) = tokio::task::spawn_blocking(move || {
+                    let mut changes: Vec<Change> = Vec::new();
+                    bus.poll(&mut |c| changes.push(c));
+                    (bus, changes)
+                })
+                .await
+                .expect("spec_bus poll task panicked");
+                bus = returned_bus;
+                for change in changes {
+                    emit(change);
+                }
+            }
+        }
+    }
+}
+
 /// A [`PollReader`] over the Core [`PersistencePort`]. Because the port returns only the
 /// payload `String` (no `updated_at`), this reader does its OWN equality-based change
 /// detection: it remembers the last payload's content hash and, when the current hash
@@ -470,5 +535,83 @@ mod tests {
             1,
             "identical content must emit exactly once (no re-emit on rewrite)"
         );
+    }
+
+    // ── Finding 2 (MAJOR) RED → GREEN: the async/Tokio-side `run_poll_loop` wrapper
+    //    (M4-REQ-03 — the seam MUST be async/Tokio-side). The loop must emit on a real
+    //    change and must stop on its shutdown signal. ─────────────────────────────────
+
+    use std::sync::mpsc;
+
+    // WU-2.6: the loop polls on its interval and emits when the watched payload changes.
+    #[tokio::test]
+    async fn run_poll_loop_emits_on_change() {
+        use spectty_adapters::InMemoryPersistenceAdapter;
+
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::new(port.clone()));
+        let bus = SpecBus::new(reader, "spectty/s/spec");
+
+        // Seed a value so the first tick has something to emit.
+        port.upsert("spectty/s/spec", "v1".to_string()).unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        // Cross the loop's emit (sync FnMut) back to the test thread.
+        let (emit_tx, emit_rx) = mpsc::channel::<Change>();
+
+        let handle = tokio::spawn(run_poll_loop(
+            bus,
+            Duration::from_millis(5),
+            shutdown_rx,
+            move |c| {
+                let _ = emit_tx.send(c);
+            },
+        ));
+
+        // Wait (bounded) for the first emit, then stop the loop.
+        let first = tokio::task::spawn_blocking(move || {
+            emit_rx.recv_timeout(Duration::from_secs(5)).map(|c| c.content)
+        })
+        .await
+        .expect("recv task panicked");
+
+        shutdown_tx.send(true).expect("shutdown send");
+        handle.await.expect("loop task panicked");
+
+        assert_eq!(
+            first.expect("the loop must emit the seeded change within the timeout"),
+            "v1",
+            "run_poll_loop must emit the watched payload on its interval"
+        );
+    }
+
+    // WU-2.6: sending the shutdown signal stops the loop (the spawned task completes).
+    #[tokio::test]
+    async fn run_poll_loop_stops_on_shutdown() {
+        use spectty_adapters::InMemoryPersistenceAdapter;
+
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::new(port.clone()));
+        let bus = SpecBus::new(reader, "spectty/s/spec");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(run_poll_loop(
+            bus,
+            Duration::from_millis(5),
+            shutdown_rx,
+            |_c| {},
+        ));
+
+        // Let the loop run a few ticks, then signal shutdown.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        shutdown_tx.send(true).expect("shutdown send");
+
+        // The loop MUST terminate promptly after the shutdown signal.
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("run_poll_loop did not stop on the shutdown signal")
+            .expect("loop task panicked");
     }
 }
