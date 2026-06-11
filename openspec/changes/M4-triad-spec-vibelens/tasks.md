@@ -260,24 +260,24 @@ scripted payloads + injected `emit` closure (mirrors `observe_and_diff` / M3 `ru
 > no `serde_json` runtime dep (round-trip tests use the dev-dep). This is the testable
 > invariant surface: legal transitions + gate-before-edit become pure unit tests.
 
-- [ ] 3.1 RED: `task_state_transition_legal_table` — `Pending→InProgress→Done`,
+- [x] 3.1 RED: `task_state_transition_legal_table` — `Pending→InProgress→Done`,
   `Pending→InProgress→Skipped` succeed; `Done` is TERMINAL (any move out → `Err`); backward
   (`InProgress→Pending`, `Done→InProgress`) → `Err(SpecError)`; illegal jump
   (`Pending→Done`) → `Err`. RED proven by swapping a legal pair. `[M4-REQ-05]` `[unit][D32]`
-- [ ] 3.2 RED: `approval_state_default_is_pending` — a freshly submitted plan starts
+- [x] 3.2 RED: `approval_state_default_is_pending` — a freshly submitted plan starts
   `ApprovalState::Pending`; variants `Pending/Approved/Rejected/Adjusted` exist + serde round-trip.
   `[M4-REQ-06]` `[unit][D32]`
-- [ ] 3.3 RED: `spec_contract_serde_round_trips` — `SpecContract { intent, proposal, tasks,
+- [x] 3.3 RED: `spec_contract_serde_round_trips` — `SpecContract { intent, proposal, tasks,
   progress, approval, steering_notes }` survives serialize → deserialize byte-stable (pure).
   `[M4-REQ-04]` `[unit][D32]`
-- [ ] 3.4 RED: `may_begin_edits_true_only_when_approved` — `may_begin_edits()` returns `true`
+- [x] 3.4 RED: `may_begin_edits_true_only_when_approved` — `may_begin_edits()` returns `true`
   ONLY when `approval == Approved`; `Pending/Rejected/Adjusted` → `false`. Dev-override
   constructor flag is representable, NOT the default, and distinguishable from a real approval.
   `[M4-REQ-07]` `[unit][D33]`
-- [ ] 3.5 RED: `apply_progress_blocks_in_progress_while_pending` — `apply_progress(task_id,
+- [x] 3.5 RED: `apply_progress_blocks_in_progress_while_pending` — `apply_progress(task_id,
   InProgress)` while `approval == Pending` → `Err(SpecError::GateNotApproved)`; same call after
   `Approved` → `Ok`. `[M4-REQ-07]` `[unit][D33]`
-- [ ] 3.6 GREEN: create `crates/core/src/entities/spec.rs` — `enum TaskState { Pending,
+- [x] 3.6 GREEN: create `crates/core/src/entities/spec.rs` — `enum TaskState { Pending,
   InProgress, Done, Skipped }` + `fn transition(self, to: TaskState) -> Result<TaskState,
   SpecError>` (one-way); `enum ApprovalState { Pending, Approved, Rejected, Adjusted }`;
   `struct SpecTask { id, title, state: TaskState }`; `struct SpecContract { intent: String,
@@ -286,8 +286,8 @@ scripted payloads + injected `emit` closure (mirrors `observe_and_diff` / M3 `ru
   -> bool`; `fn apply_progress(&mut self, task_id: &str, to: TaskState) -> Result<(), SpecError>`;
   `enum SpecError` (thiserror, incl. `GateNotApproved`). `serde + thiserror` ONLY.
   `[M4-REQ-04][M4-REQ-05][M4-REQ-06][M4-REQ-07]` `[unit][ci][D32][D33]`
-- [ ] 3.7 GREEN: export from `crates/core/src/entities/mod.rs` + re-export at Core `lib.rs`. `[ci]`
-- [ ] **Gate (WU-3)**: `cargo test --workspace` green (5 pure entity tests); fmt/clippy clean;
+- [x] 3.7 GREEN: export from `crates/core/src/entities/mod.rs` + re-export at Core `lib.rs`. `[ci]`
+- [x] **Gate (WU-3)**: `cargo test --workspace` green (5 pure entity tests); fmt/clippy clean;
   `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok` (Core gained ONLY
   `serde + thiserror` types — M4-REQ-04/ci). **This is the load-bearing Core-quarantine WU.**
 

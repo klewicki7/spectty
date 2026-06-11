@@ -1,0 +1,393 @@
+//! The living `SpecContract` — the agent's plan, progress, and approval state as a
+//! PURE Core aggregate (D32/D33, ADR-0007).
+//!
+//! M4 introduces the "Living Spec Pane": a cooperative agent pushes its plan and
+//! progress through the `spectty_spec` MCP effect, the adapter serializes a
+//! `SpecContract` into engram, and the poll loop surfaces it to the UI. Everything in
+//! this module is `serde + thiserror` ONLY — no I/O, no time, no agent name. The
+//! serialization to engram is the ADAPTER's job; this file owns the SHAPE and the
+//! legal-transition / approval-gate RULES.
+//!
+//! ## The two business invariants (the testable surface)
+//!
+//! 1. [`TaskState::transition`] is a ONE-WAY state machine — `pending → {in_progress,
+//!    skipped}`, `in_progress → {done, skipped}`, `done` terminal. It mirrors
+//!    [`agent_status::transition`](crate::entities::agent_status::transition): a single
+//!    pure authority so no caller can illegally jump a task forward or backward.
+//! 2. The plan-approval gate ([`SpecContract::may_begin_edits`] /
+//!    [`SpecContract::apply_progress`]) is a Core rule, not an adapter convention: a
+//!    task may move to `InProgress` ONLY once the plan is `Approved`. Adapters READ this
+//!    rule (ADR-0007); they never re-implement it.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Lifecycle state of a single planned task (D32).
+///
+/// The legal transitions are owned by the pure [`TaskState::transition`] method — the
+/// SINGLE authority — so no caller can illegally jump a task. Mirrors the
+/// [`AgentStatus`](crate::AgentStatus) discipline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    /// Not yet started.
+    Pending,
+    /// Actively being worked.
+    InProgress,
+    /// Finished cleanly (TERMINAL).
+    Done,
+    /// Intentionally not done (TERMINAL).
+    Skipped,
+}
+
+impl TaskState {
+    /// PURE one-way transition. Returns the next state for a legal move, or
+    /// [`SpecError::IllegalTransition`] for an illegal one (the caller's state is left
+    /// unchanged — the error carries the rejected pair).
+    ///
+    /// Legal edges (and ONLY these):
+    /// - `Pending → InProgress`
+    /// - `Pending → Skipped`
+    /// - `InProgress → Done`
+    /// - `InProgress → Skipped`
+    ///
+    /// `Done` and `Skipped` are TERMINAL: any move out of them is illegal. Backward moves
+    /// (`InProgress → Pending`, `Done → InProgress`) and illegal jumps (`Pending → Done`)
+    /// are rejected. The function is total, deterministic, and side-effect free.
+    pub fn transition(self, to: TaskState) -> Result<TaskState, SpecError> {
+        use TaskState::{Done, InProgress, Pending, Skipped};
+        match (self, to) {
+            (Pending, InProgress | Skipped) => Ok(to),
+            (InProgress, Done | Skipped) => Ok(to),
+            // Everything else — terminal source, backward move, or illegal jump.
+            (from, to) => Err(SpecError::IllegalTransition { from, to }),
+        }
+    }
+}
+
+/// The plan-approval lifecycle (D32/D33).
+///
+/// A freshly submitted plan starts [`ApprovalState::Pending`]; the user resolves it to
+/// one of the other variants. `Approved` is the ONLY state that satisfies the
+/// edit gate ([`SpecContract::may_begin_edits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalState {
+    /// Awaiting the user's decision (the default for a submitted plan).
+    Pending,
+    /// The user approved the plan — the gate opens.
+    Approved,
+    /// The user rejected the plan outright.
+    Rejected,
+    /// The user wants changes (steering notes) before approving.
+    Adjusted,
+}
+
+impl Default for ApprovalState {
+    /// A submitted plan starts `Pending` (D33).
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+/// A single planned task in a [`SpecContract`] (D32).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecTask {
+    /// Stable identifier the agent assigns; the gate addresses tasks by this id.
+    pub id: String,
+    /// Human-readable task title.
+    pub title: String,
+    /// Current lifecycle state.
+    pub state: TaskState,
+    /// Optional free-form notes the agent attaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// A progress entry: which task advanced and to what state (D32). Kept distinct from the
+/// task list so an agent can stream incremental progress without resending every task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskProgress {
+    /// The task this progress refers to.
+    pub task_id: String,
+    /// The state the task reached.
+    pub state: TaskState,
+}
+
+/// The living plan-and-progress aggregate (D32).
+///
+/// PURE: `serde + thiserror` only, no I/O / time / agent name. The adapter serializes
+/// this to `spectty/{session_id}/spec`; the UI renders it. The approval gate
+/// ([`may_begin_edits`](Self::may_begin_edits) / [`apply_progress`](Self::apply_progress))
+/// is the Core business rule (ADR-0007) adapters read but never re-implement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecContract {
+    /// The one-line intent / goal of the plan.
+    pub intent: String,
+    /// The full proposal prose, if the agent supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
+    /// The planned tasks.
+    pub tasks: Vec<SpecTask>,
+    /// Incremental progress entries.
+    #[serde(default)]
+    pub progress: Vec<TaskProgress>,
+    /// The plan-approval state. Defaults to [`ApprovalState::Pending`].
+    #[serde(default)]
+    pub approval: ApprovalState,
+    /// Free-form steering notes the user attaches when adjusting the plan.
+    #[serde(default)]
+    pub steering_notes: Vec<String>,
+    /// DEV-ONLY escape hatch: when `true`, [`may_begin_edits`](Self::may_begin_edits)
+    /// returns `true` regardless of `approval`, so a developer can bypass the gate while
+    /// iterating. NEVER set by a real approval flow (those go through `approval`), and it
+    /// is distinguishable from a genuine `Approved` — the gate checks `approval` FIRST.
+    #[serde(default)]
+    pub dev_override: bool,
+}
+
+impl SpecContract {
+    /// The plan-approval gate (D33). Edits to the workspace may begin ONLY when the plan
+    /// is [`ApprovalState::Approved`] — OR when the dev-override flag is set (iteration
+    /// escape hatch, never a real approval).
+    #[must_use]
+    pub fn may_begin_edits(&self) -> bool {
+        matches!(self.approval, ApprovalState::Approved) || self.dev_override
+    }
+
+    /// Advance a task to `to`, enforcing BOTH the one-way [`TaskState::transition`] rule
+    /// AND the plan-approval gate (D33): moving a task to [`TaskState::InProgress`] while
+    /// the plan is not yet approved is rejected with [`SpecError::GateNotApproved`].
+    ///
+    /// On success the task's state is updated in place and a [`TaskProgress`] entry is
+    /// appended. An unknown `task_id` is [`SpecError::UnknownTask`].
+    pub fn apply_progress(&mut self, task_id: &str, to: TaskState) -> Result<(), SpecError> {
+        // Gate FIRST: beginning work (→ InProgress) requires an approved plan. Checked
+        // before the transition so an unapproved "start" is rejected as a gate error, not
+        // masked by a transition error.
+        if to == TaskState::InProgress && !self.may_begin_edits() {
+            return Err(SpecError::GateNotApproved);
+        }
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
+            .ok_or_else(|| SpecError::UnknownTask(task_id.to_string()))?;
+        let next = task.state.transition(to)?;
+        task.state = next;
+        self.progress.push(TaskProgress {
+            task_id: task_id.to_string(),
+            state: next,
+        });
+        Ok(())
+    }
+}
+
+/// Errors from the pure spec rules (D32/D33). `thiserror` only — no I/O concerns.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SpecError {
+    /// A [`TaskState::transition`] that violates the one-way state machine.
+    #[error("illegal task transition: {from:?} -> {to:?}")]
+    IllegalTransition {
+        /// The source state.
+        from: TaskState,
+        /// The rejected target state.
+        to: TaskState,
+    },
+    /// A task was moved to `InProgress` while the plan-approval gate was not satisfied.
+    #[error("plan not approved: edits may not begin until the plan is Approved")]
+    GateNotApproved,
+    /// `apply_progress` referenced a task id that is not in the contract.
+    #[error("unknown task id: {0}")]
+    UnknownTask(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contract_with(approval: ApprovalState, tasks: Vec<SpecTask>) -> SpecContract {
+        SpecContract {
+            intent: "fix the bug".to_string(),
+            proposal: Some("a detailed plan".to_string()),
+            tasks,
+            progress: Vec::new(),
+            approval,
+            steering_notes: Vec::new(),
+            dev_override: false,
+        }
+    }
+
+    fn task(id: &str, state: TaskState) -> SpecTask {
+        SpecTask {
+            id: id.to_string(),
+            title: format!("task {id}"),
+            state,
+            notes: None,
+        }
+    }
+
+    // WU-3.1: the one-directional legal-transition table.
+    #[test]
+    fn task_state_transition_legal_table() {
+        use TaskState::{Done, InProgress, Pending, Skipped};
+
+        // Legal forward edges.
+        assert_eq!(Pending.transition(InProgress), Ok(InProgress));
+        assert_eq!(Pending.transition(Skipped), Ok(Skipped));
+        assert_eq!(InProgress.transition(Done), Ok(Done));
+        assert_eq!(InProgress.transition(Skipped), Ok(Skipped));
+
+        // Illegal jump: Pending -> Done skips InProgress.
+        assert_eq!(
+            Pending.transition(Done),
+            Err(SpecError::IllegalTransition {
+                from: Pending,
+                to: Done
+            })
+        );
+
+        // Backward moves are illegal.
+        assert!(InProgress.transition(Pending).is_err());
+        assert!(Done.transition(InProgress).is_err());
+
+        // Done and Skipped are TERMINAL: any move out is illegal.
+        for to in [Pending, InProgress, Done, Skipped] {
+            if to != Done {
+                assert!(
+                    Done.transition(to).is_err(),
+                    "Done is terminal; Done -> {to:?} must be illegal"
+                );
+            }
+            if to != Skipped {
+                assert!(
+                    Skipped.transition(to).is_err(),
+                    "Skipped is terminal; Skipped -> {to:?} must be illegal"
+                );
+            }
+        }
+    }
+
+    // WU-3.2: ApprovalState default + all variants + serde round-trip.
+    #[test]
+    fn approval_state_default_is_pending() {
+        assert_eq!(ApprovalState::default(), ApprovalState::Pending);
+
+        for state in [
+            ApprovalState::Pending,
+            ApprovalState::Approved,
+            ApprovalState::Rejected,
+            ApprovalState::Adjusted,
+        ] {
+            let json = serde_json::to_string(&state).expect("serialize");
+            let back: ApprovalState = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(state, back, "ApprovalState::{state:?} must round-trip");
+        }
+    }
+
+    // WU-3.3: SpecContract serde round-trips byte-stable.
+    #[test]
+    fn spec_contract_serde_round_trips() {
+        let mut contract = contract_with(
+            ApprovalState::Approved,
+            vec![
+                task("t1", TaskState::Done),
+                task("t2", TaskState::InProgress),
+            ],
+        );
+        contract.progress.push(TaskProgress {
+            task_id: "t1".to_string(),
+            state: TaskState::Done,
+        });
+        contract.steering_notes.push("prefer small PRs".to_string());
+
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let back: SpecContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, back, "SpecContract must round-trip");
+
+        // Re-serializing the round-tripped value yields byte-identical JSON.
+        let json2 = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(json, json2, "serialization must be byte-stable");
+    }
+
+    // WU-3.4: may_begin_edits is true ONLY when Approved (or dev_override).
+    #[test]
+    fn may_begin_edits_true_only_when_approved() {
+        assert!(contract_with(ApprovalState::Approved, vec![]).may_begin_edits());
+
+        for blocked in [
+            ApprovalState::Pending,
+            ApprovalState::Rejected,
+            ApprovalState::Adjusted,
+        ] {
+            assert!(
+                !contract_with(blocked, vec![]).may_begin_edits(),
+                "approval {blocked:?} must NOT open the gate"
+            );
+        }
+
+        // The dev-override escape hatch opens the gate but is distinguishable from a real
+        // approval (approval stays Pending).
+        let mut overridden = contract_with(ApprovalState::Pending, vec![]);
+        overridden.dev_override = true;
+        assert!(overridden.may_begin_edits());
+        assert_eq!(
+            overridden.approval,
+            ApprovalState::Pending,
+            "dev_override must NOT masquerade as a real approval"
+        );
+    }
+
+    // WU-3.5: the apply_progress gate blocks InProgress while Pending, allows it once
+    // Approved.
+    #[test]
+    fn apply_progress_blocks_in_progress_while_pending() {
+        // Pending plan: moving t1 to InProgress is gated.
+        let mut pending =
+            contract_with(ApprovalState::Pending, vec![task("t1", TaskState::Pending)]);
+        assert_eq!(
+            pending.apply_progress("t1", TaskState::InProgress),
+            Err(SpecError::GateNotApproved)
+        );
+        // The task did NOT advance and no progress was recorded.
+        assert_eq!(pending.tasks[0].state, TaskState::Pending);
+        assert!(pending.progress.is_empty());
+
+        // Approved plan: the SAME call now succeeds and records progress.
+        let mut approved = contract_with(
+            ApprovalState::Approved,
+            vec![task("t1", TaskState::Pending)],
+        );
+        assert_eq!(approved.apply_progress("t1", TaskState::InProgress), Ok(()));
+        assert_eq!(approved.tasks[0].state, TaskState::InProgress);
+        assert_eq!(approved.progress.len(), 1);
+        assert_eq!(approved.progress[0].task_id, "t1");
+        assert_eq!(approved.progress[0].state, TaskState::InProgress);
+    }
+
+    // Triangulation for apply_progress: an unknown task id is a distinct error, and an
+    // illegal transition (even when the gate is open and not an InProgress move) is
+    // surfaced as IllegalTransition.
+    #[test]
+    fn apply_progress_unknown_task_and_illegal_transition() {
+        let mut approved =
+            contract_with(ApprovalState::Approved, vec![task("t1", TaskState::Done)]);
+
+        // Unknown task id.
+        assert_eq!(
+            approved.apply_progress("nope", TaskState::Skipped),
+            Err(SpecError::UnknownTask("nope".to_string()))
+        );
+
+        // t1 is Done (terminal): moving it to Skipped is an illegal transition, not a gate
+        // error (Skipped does not hit the InProgress gate).
+        assert_eq!(
+            approved.apply_progress("t1", TaskState::Skipped),
+            Err(SpecError::IllegalTransition {
+                from: TaskState::Done,
+                to: TaskState::Skipped
+            })
+        );
+        // No progress recorded for either failed call.
+        assert!(approved.progress.is_empty());
+    }
+}
