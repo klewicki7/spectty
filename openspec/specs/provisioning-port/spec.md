@@ -109,3 +109,96 @@ wiring MUST be testable against a fake Provisioner.
 - **When** the session is closed
 - **Then** the PTY MUST be killed AND `retract` MUST be invoked for the resolved scope,
   asserted against the fake without a real config file
+
+---
+
+## M3 capability: hook-provisioning
+
+The `ClaudeSettingsProvisioner` is a SECOND `ProvisioningPort` impl, operating on
+`~/.claude/settings.json` (Global) or `{project}/.claude/settings.json` (Project). It manages
+ONLY the `hooks` key using the same M2 `ConfigFile` atomic-write seam, `.spectty.bak` backup,
+and foreign-key preservation invariant (R7). The Core `ProvisioningPort` trait is UNCHANGED.
+
+## Requirement: ClaudeSettingsProvisioner manages the hooks section of settings.json  [unit]
+
+`crates/adapters` MUST provide a `ClaudeSettingsProvisioner` that implements `ProvisioningPort`
+(the existing M2 Core trait, UNCHANGED). It MUST manage ONLY the `hooks` top-level key in
+`~/.claude/settings.json` (Global) or `{project}/.claude/settings.json` (Project). It MUST
+NOT touch `mcpServers`, `permissions`, `env`, `model`, or any other key in settings.json.
+The managed key is `hooks` and the managed sub-entries are keyed by hook event name in the
+`spectty_*` namespace.
+
+### Scenario: ClaudeSettingsProvisioner implements ProvisioningPort without trait change  [unit]
+- **Given** the `ProvisioningPort` trait after M2 (unchanged)
+- **When** `ClaudeSettingsProvisioner` is inspected for trait conformance
+- **Then** it MUST implement `inject(scope)` and `retract(scope)` matching the existing trait
+  signature with no new methods required on the Core trait
+
+### Scenario: inject adds managed hook entries and leaves foreign keys untouched  [unit]
+- **Given** a settings.json string containing user-authored `hooks`, a `permissions` key, and
+  a `model` key (diverse foreign content)
+- **When** `inject_spectty_hooks` is called on that string (the pure namespace editor)
+- **Then** the output MUST contain the new Spectty-managed hook entries for each configured
+  event AND every foreign key (`permissions`, `model`, and any existing user `hooks` sub-entries
+  not managed by Spectty) MUST be present and structurally unchanged — asserted as a pure
+  `String -> String` unit with no file-IO
+
+### Scenario: retract removes only Spectty-managed hook entries  [unit]
+- **Given** a settings.json string containing both Spectty-managed hook entries and user-authored
+  hook entries under the same or different event names
+- **When** `retract_spectty_hooks` is called on that string
+- **Then** all Spectty-managed entries MUST be absent AND every user-authored hook entry MUST
+  be present and structurally unchanged — asserted as a pure unit
+
+### Scenario: Editing absent or empty hooks section creates valid output  [unit]
+- **Given** a settings.json string with no `hooks` key (or an empty document `{}`)
+- **When** `inject_spectty_hooks` is called
+- **Then** the output MUST be valid JSON containing a `hooks` object with the Spectty-managed
+  entries AND all other absent keys MUST remain absent (no key creation side-effects)
+
+### Scenario: retract on a settings.json that has no Spectty hooks is idempotent  [unit]
+- **Given** a settings.json with no Spectty-managed hook entries (fresh file or already retracted)
+- **When** `retract_spectty_hooks` is called
+- **Then** the output MUST equal the input structurally (no keys added or removed) AND MUST
+  remain valid JSON — asserted as a pure unit
+
+## Requirement: Settings.json scope path resolves correctly for Global and Project  [unit]
+
+The `ClaudeSettingsProvisioner` MUST resolve `ProvisioningScope::Global` to
+`~/.claude/settings.json` and `ProvisioningScope::Project(root)` to
+`{root}/.claude/settings.json`. This is a DISTINCT path mapping from the M2 `ClaudeJsonProvisioner`
+(which resolves Global to `~/.claude.json` and Project to `{root}/.mcp.json`). The path
+resolution MUST be a pure function asserted without touching the filesystem. The existing
+injected `is_git_tracked` predicate (M2) governs scope selection upstream; the settings path
+resolver just maps the chosen scope to its file path.
+
+### Scenario: Global scope resolves to ~/.claude/settings.json  [unit]
+- **Given** the settings path resolver with `ProvisioningScope::Global`
+- **When** the resolver runs
+- **Then** it MUST return the path `~/.claude/settings.json` (expanded) with no filesystem access
+
+### Scenario: Project scope resolves to {root}/.claude/settings.json  [unit]
+- **Given** the settings path resolver with `ProvisioningScope::Project("/some/repo")`
+- **When** the resolver runs
+- **Then** it MUST return `/some/repo/.claude/settings.json` with no filesystem access
+
+## Requirement: Settings.json writes are atomic with a one-time .spectty.bak backup  [unit]
+
+`ClaudeSettingsProvisioner` MUST use the same M2 `ConfigFile` atomic-write seam (temp file →
+fsync → atomic rename) for all writes to settings.json. Before the FIRST write to a given
+settings.json path, it MUST copy the existing file to `<path>.spectty.bak`. The seam MUST be
+injectable so backup + atomic-write behavior is testable with a fake filesystem, matching the
+M2 `ClaudeJsonProvisioner` contract exactly.
+
+### Scenario: First write creates a .spectty.bak backup of the original settings.json  [unit]
+- **Given** an existing settings.json with user content and the atomic-write seam backed by a
+  fake filesystem
+- **When** `ClaudeSettingsProvisioner` performs its first write (inject call)
+- **Then** a `<settings-path>.spectty.bak` copy of the ORIGINAL contents MUST exist AND the
+  written file MUST land via temp-file-then-rename — asserted on the fake filesystem operations
+
+### Scenario: Subsequent writes do not overwrite an existing .spectty.bak  [unit]
+- **Given** a settings.json where a `.spectty.bak` already exists (from a prior inject)
+- **When** `ClaudeSettingsProvisioner` performs a second write (e.g. retract then re-inject)
+- **Then** the `.spectty.bak` MUST NOT be overwritten — the original pre-Spectty state is
+  preserved as the escape hatch
