@@ -29,3 +29,6 @@ portable-pty = "0.9.0"
 # them in `crates/core` and remains green.
 tokio = { workspace = true }
 reqwest = { workspace = true }
+# M4 (PR-4, D35): the real file-system watcher backing `FileWatchPort`. Stays in ADAPTERS
+# only — Core's `cargo deny ... check bans` forbids it in `crates/core` and remains green.
+notify = { workspace = true }
