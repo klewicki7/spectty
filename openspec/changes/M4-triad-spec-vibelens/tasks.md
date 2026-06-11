@@ -428,25 +428,25 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 > `FileChanged` batches. Zero new Core deps. Hash = `std::collections::hash_map::DefaultHasher`
 > over the diff string (std only).
 
-- [ ] 6.1 RED: `diff_explanation_empty_is_well_formed` — `DiffExplanation::empty()` → empty
+- [x] 6.1 RED: `diff_explanation_empty_is_well_formed` — `DiffExplanation::empty()` → empty
   `files`, empty `summary`; serde round-trips. `[M4-REQ-12]` `[unit][D34]`
-- [ ] 6.2 RED: `session_update_diff_stores_hash` — `Session::update_diff(expl, hash)` sets
+- [x] 6.2 RED: `session_update_diff_stores_hash` — `Session::update_diff(expl, hash)` sets
   `last_diff` + `last_diff_hash`; same-hash detection is observable on the aggregate. `[M4-REQ-13]`
   `[unit][D34]`
-- [ ] 6.3 RED: `core_ports_are_object_safe_and_sync` — compile-time: `fn _g(_: &dyn GitPort){}`,
+- [x] 6.3 RED: `core_ports_are_object_safe_and_sync` — compile-time: `fn _g(_: &dyn GitPort){}`,
   `fn _e(_: &dyn DiffExplainerPort){}`, `fn _w(_: &dyn FileWatchPort){}` — confirms SYNC,
   `Send + Sync`, object-safe, no `async-trait`. `[M4-REQ-12]` `[unit][ci][D35]`
-- [ ] 6.4 GREEN: create `crates/core/src/entities/diff.rs` — `struct DiffExplanation { files:
+- [x] 6.4 GREEN: create `crates/core/src/entities/diff.rs` — `struct DiffExplanation { files:
   Vec<FileExplanation>, summary: String }` + `struct FileExplanation { path: String, rationale:
   String }` + `fn empty() -> Self`. `serde + thiserror`. `[M4-REQ-12]` `[unit][D34]`
-- [ ] 6.5 GREEN: modify `crates/core/src/entities/session.rs` — add `last_diff:
+- [x] 6.5 GREEN: modify `crates/core/src/entities/session.rs` — add `last_diff:
   Option<DiffExplanation>`, `last_diff_hash: Option<u64>`, `fn update_diff(&mut self, expl:
   DiffExplanation, hash: u64)`. `[M4-REQ-13]` `[unit][D34]`
-- [ ] 6.6 GREEN: create `crates/core/src/ports/git.rs` (`GitPort::diff_head` + `enum GitError`),
+- [x] 6.6 GREEN: create `crates/core/src/ports/git.rs` (`GitPort::diff_head` + `enum GitError`),
   `crates/core/src/ports/file_watch.rs` (`FileWatchPort`), `crates/core/src/ports/diff_explainer.rs`
   (`DiffExplainerPort::explain` + `enum ExplainError`). ALL SYNC. Export from
   `crates/core/src/ports/mod.rs`. `[M4-REQ-12]` `[unit][ci][D35]`
-- [ ] **Gate (WU-6)**: `cargo test --workspace` green (3 pure tests); fmt/clippy clean;
+- [x] **Gate (WU-6)**: `cargo test --workspace` green (3 pure tests); fmt/clippy clean;
   `cargo deny --manifest-path crates/core/Cargo.toml check bans` → `bans ok` (Core gained ONLY
   serde+thiserror types/traits, NO `async-trait`/`notify`/`git2` — M4-REQ-12/ci). **Load-bearing
   Core-quarantine WU.**

@@ -127,6 +127,8 @@ pub fn spawn_session_impl(
         status: AgentStatus::Starting,
         title: title.to_string(),
         created_at: now,
+        last_diff: None,
+        last_diff_hash: None,
     });
 
     Ok(SpawnOutcome {
@@ -196,6 +198,8 @@ pub fn spawn_session_impl_with_hooks(
         status: AgentStatus::Starting,
         title: title.to_string(),
         created_at: now,
+        last_diff: None,
+        last_diff_hash: None,
     });
 
     Ok(SpawnOutcome {
@@ -1422,6 +1426,8 @@ mod tests {
             status: AgentStatus::Starting,
             title: "shared-registry probe".to_string(),
             created_at: spectty_core::Timestamp(0),
+            last_diff: None,
+            last_diff_hash: None,
         });
 
         // What `spawn_session` hands the signal thread: an `Arc::clone`, NOT a deep copy.
