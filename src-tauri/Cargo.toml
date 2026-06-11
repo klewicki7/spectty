@@ -26,6 +26,9 @@ spectty-adapters = { path = "../crates/adapters" }
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde = { workspace = true }
+# M4 WU-4: the living-spec pipeline (de)serializes the SpecContract payload that the
+# `spectty_spec` effect upserts to engram. Adapter-side concern — Core never gains it.
+serde_json = { workspace = true }
 # portable-pty lives here too (not just adapters): the read-thread/Channel wiring
 # and the real-PTY integration test drive PtyAdapter against an actual pty. Core
 # stays clean — this dependency never reaches spectty-core.

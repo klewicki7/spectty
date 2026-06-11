@@ -316,31 +316,31 @@ emits, no `AppHandle`) + restart-hydrate FIRST.
 > session ids are wired, the `"spectty"` stopgap in `engram_session_id` should be unreachable for
 > canonical `spectty/{sid}/{spec|progress|cost}` keys (a `debug_assert` + test already pin this).
 
-- [ ] 4.1 RED: `spectty_mcp_tools_list_schema_is_byte_frozen` — assert `tools/list` output for
+- [x] 4.1 RED: `spectty_mcp_tools_list_schema_is_byte_frozen` — assert `tools/list` output for
   the 5 tools is byte-for-byte identical to the M3-frozen schema fixture; only `tools/call`
   effects change. RED proven by mutating a description. `[M4-REQ-08]` `[unit][ci][D16]`
-- [ ] 4.2 RED: `spectty_spec_upserts_canonical_key_and_returns_immediately` — fake engram HTTP
+- [x] 4.2 RED: `spectty_spec_upserts_canonical_key_and_returns_immediately` — fake engram HTTP
   client; `spectty_spec` payload → upsert to `spectty/{session_id}/spec`, returns without
   blocking. Malformed payload → rejected, no crash. `[M4-REQ-09]` `[unit][D5]`
-- [ ] 4.3 RED: `poll_change_emits_spec_updated_once` — integration: SpecBus over Fake port
+- [x] 4.3 RED: `poll_change_emits_spec_updated_once` — integration: SpecBus over Fake port
   scripted with one spec change → collected emits contain EXACTLY ONE `spec_updated` with the
   deserialized `SpecContract`. `[M4-REQ-09][M4-REQ-17]` `[unit][D29]`
-- [ ] 4.4 RED: `restart_hydrate_emits_initial_spec_updated` — re-attach path does ONE
+- [x] 4.4 RED: `restart_hydrate_emits_initial_spec_updated` — re-attach path does ONE
   `get(spectty/{sid}/spec)` (+ `.../progress`), reconstructs `SpecContract`, emits initial
   `spec_updated`; engram-down → degrades to empty/last-known, NO crash. `[M4-REQ-23]`
   `[unit][D38]`
-- [ ] 4.5 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_spec` `tools/call` handler
+- [x] 4.5 GREEN: extend `crates/spectty-mcp/src/main.rs` — `spectty_spec` `tools/call` handler
   builds the `SpecContract` JSON and POST-upserts via a new serde+http engram client to
   `spectty/{session_id}/spec`; returns immediately. Schema (`tools/list`) UNTOUCHED.
   `[M4-REQ-08][M4-REQ-09]` `[unit][D16]`
-- [ ] 4.6 GREEN: create `src-tauri/src/commands/spec.rs` — `get_spec(id) -> Option<SpecContract>`
+- [x] 4.6 GREEN: create `src-tauri/src/commands/spec.rs` — `get_spec(id) -> Option<SpecContract>`
   command; register in `generate_handler!`. Add `spec_updated` event emission inside the SpecBus
   injected-emit closure (v2 `Emitter`), emit ONLY on actual change. `[M4-REQ-16][M4-REQ-17]`
   `[unit][D29]`
-- [ ] 4.7 GREEN: wire restart hydrate in `src-tauri/src/commands/session.rs` — on spawn/re-attach,
+- [x] 4.7 GREEN: wire restart hydrate in `src-tauri/src/commands/session.rs` — on spawn/re-attach,
   before starting the poll interval, ONE `get` per spec/progress key → emit initial
   `spec_updated`. `[M4-REQ-23]` `[unit][D38]`
-- [ ] **Gate (WU-4)**: `cargo test --workspace` green (frozen-schema + 3 integration/effect tests);
+- [x] **Gate (WU-4)**: `cargo test --workspace` green (frozen-schema + 3 integration/effect tests);
   fmt/clippy clean; `cargo deny ... check bans` → `bans ok` (spectty-mcp stays serde+http only).
 
 > **Slice 2 COMPLETE after WU-4.** PR-2 = WU-3 + WU-4. Green: pure entity unit tests +

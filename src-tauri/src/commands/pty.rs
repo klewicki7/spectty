@@ -131,6 +131,8 @@ pub async fn pty_spawn(
         provisioning: None,
         hooks_handle: None,
         state_file_path: String::new(),
+        // A raw PTY has no spec pipeline.
+        spec_poll_shutdown: None,
     };
 
     lock_registry(&registry.0)?.insert(id.clone(), state);
@@ -387,6 +389,7 @@ mod tests {
                 provisioning: None,
                 hooks_handle: None,
                 state_file_path: String::new(),
+                spec_poll_shutdown: None,
             },
         );
         (Mutex::new(map), calls)
