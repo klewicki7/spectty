@@ -192,6 +192,7 @@ fn handle_tools_call(params: Option<&Value>, engram: &dyn EngramClient) -> Resul
     let arguments = params.get("arguments");
     match name {
         "spectty_spec" => spectty_spec_effect(arguments, engram),
+        "spectty_approval" => spectty_approval_effect(arguments, engram),
         // The remaining tools keep the benign stub ack (effects land in later slices).
         other => Ok(stub_ack(other)),
     }
@@ -244,6 +245,193 @@ fn spectty_spec_effect(
             "isError": true
         })),
     }
+}
+
+/// Default approval long-poll interval (D31: "~500 ms, bounded"). Overridable via
+/// `SPECTTY_APPROVAL_POLL_MS`.
+const APPROVAL_POLL_MS: u64 = 500;
+/// Default bounded number of long-poll attempts before the handler returns a `pending`
+/// (timeout) result rather than hanging the agent's turn forever (D31, spec: "return
+/// pending/timeout, never hang"). Default ≈ 5 minutes at 500 ms. Overridable via
+/// `SPECTTY_APPROVAL_MAX_POLLS`.
+const APPROVAL_MAX_POLLS: u32 = 600;
+
+/// The `spectty_approval` EFFECT (M4 WU-5, D31/D33). This is the ONE genuinely BLOCKING
+/// tool: it registers a pending request at `spectty/{session_id}/approval` and then
+/// LONG-POLLS the same key until the app's `approve_prompt` writes back a `resolution`, at
+/// which point the resolution is returned to the agent. A malformed payload (missing
+/// `session_id`/`action_id`) is `-32602`. An engram transport failure degrades to a benign
+/// `isError` result — never a panic, so a down daemon does not break the turn.
+///
+/// `main` drives this with a real 500 ms sleep; tests inject an immediate resolver via a
+/// fake client and a zero interval so no real wall-clock time is spent.
+fn spectty_approval_effect(
+    arguments: Option<&Value>,
+    engram: &dyn EngramClient,
+) -> Result<Value, RpcError> {
+    let arguments = arguments.ok_or_else(|| RpcError::new(INVALID_PARAMS, "Missing arguments"))?;
+
+    let session_id = arguments
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, "spectty_approval: missing session_id"))?;
+    let action_id = arguments
+        .get("action_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, "spectty_approval: missing action_id"))?;
+
+    let topic_key = format!("spectty/{session_id}/approval");
+
+    // Register the PENDING request (resolution: null). Built from the advertised arguments
+    // so the app's status path can derive `quick_actions` from `options`. Idempotent: a
+    // duplicate `(session_id, action_id)` upsert overwrites with the same pending content,
+    // so exactly one pending entry exists for the key (spec M4-REQ-10).
+    let pending = json!({
+        "action_id": action_id,
+        "description": arguments.get("description").and_then(Value::as_str).unwrap_or(""),
+        "risk_level": arguments.get("risk_level").and_then(Value::as_str),
+        "options": arguments.get("options").cloned().unwrap_or_else(|| json!([])),
+        "resolution": Value::Null,
+    });
+    if let Err(EngramClientError::Transport(msg)) = engram.upsert(&topic_key, &pending.to_string())
+    {
+        return Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("spectty_approval: engram unavailable ({msg}); approval not registered")
+            }],
+            "isError": true
+        }));
+    }
+
+    // Long-poll the same key until the app writes a non-null `resolution`, or the bounded
+    // budget elapses (return a `pending` result rather than hanging — D31).
+    let interval = Duration::from_millis(approval_poll_ms());
+    match poll_for_resolution(
+        engram,
+        &topic_key,
+        action_id,
+        approval_max_polls(),
+        interval,
+    ) {
+        Ok(Some(decision)) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("spectty_approval: resolved as {decision}")
+            }],
+            "isError": false
+        })),
+        // Bounded budget elapsed with no resolution: tell the agent it is still pending so it
+        // can decide what to do — the turn ends rather than blocking forever.
+        Ok(None) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": "spectty_approval: still pending (approval long-poll timed out)"
+            }],
+            "isError": false
+        })),
+        Err(EngramClientError::Transport(msg)) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("spectty_approval: engram unavailable ({msg}); cannot await resolution")
+            }],
+            "isError": true
+        })),
+    }
+}
+
+/// How many CONSECUTIVE transient `get` failures the long-poll tolerates before surfacing the
+/// error (PR-3 Finding 4). A single blip — e.g. the 2 s client timeout firing once under load —
+/// must NOT abort an otherwise-healthy poll; only a sustained outage does. The counter resets
+/// on any successful read, so isolated blips never accumulate across the whole budget.
+const APPROVAL_MAX_CONSECUTIVE_GET_FAILURES: u32 = 3;
+
+/// Poll `topic_key` up to `max_polls` times (sleeping `interval` between attempts) for the
+/// stored approval document's `resolution` to become a non-null decision matching
+/// `action_id`. Returns:
+/// - `Ok(Some(decision))` once a resolution is observed (the canonical Core `ApprovalState`
+///   string the app wrote, e.g. `"Approved"`);
+/// - `Ok(None)` if the budget elapses with no resolution (bounded — never hangs);
+/// - `Err` only after [`APPROVAL_MAX_CONSECUTIVE_GET_FAILURES`] CONSECUTIVE transport failures
+///   (a single transient blip is tolerated and retried within the same `max_polls` budget).
+///
+/// PURE over the [`EngramClient`] seam: tests pass a fake that resolves on the first read and
+/// a zero `interval`, so no real wall-clock time is consumed and the loop logic is exercised
+/// directly. `max_polls` stays the authoritative total bound — tolerated retries are spent
+/// from the SAME budget, they never extend it.
+fn poll_for_resolution(
+    engram: &dyn EngramClient,
+    topic_key: &str,
+    action_id: &str,
+    max_polls: u32,
+    interval: Duration,
+) -> Result<Option<String>, EngramClientError> {
+    // Count consecutive transport failures so one blip does not abort the whole poll; reset to
+    // zero on any successful read so only a SUSTAINED outage surfaces (PR-3 Finding 4).
+    let mut consecutive_failures: u32 = 0;
+    for attempt in 0..max_polls {
+        match engram.get(topic_key) {
+            Ok(maybe_content) => {
+                consecutive_failures = 0;
+                if let Some(content) = maybe_content {
+                    if let Some(decision) = resolution_of(&content, action_id) {
+                        return Ok(Some(decision));
+                    }
+                }
+            }
+            Err(err) => {
+                consecutive_failures += 1;
+                // Only give up once a SUSTAINED outage exceeds the tolerance — a transient blip
+                // is absorbed and retried (still within the `max_polls` total bound).
+                if consecutive_failures >= APPROVAL_MAX_CONSECUTIVE_GET_FAILURES {
+                    return Err(err);
+                }
+            }
+        }
+        // Sleep BETWEEN attempts, not after the last one (which would waste an interval).
+        if attempt + 1 < max_polls && !interval.is_zero() {
+            std::thread::sleep(interval);
+        }
+    }
+    Ok(None)
+}
+
+/// Extract a non-null `resolution` decision for `action_id` from a stored approval document,
+/// or `None` if the document is unparseable, addresses a different `action_id`, or is still
+/// pending (`resolution: null`). The decision is whatever canonical string the app wrote
+/// (a Core `ApprovalState` variant); the MCP does not interpret it beyond returning it.
+fn resolution_of(content: &str, action_id: &str) -> Option<String> {
+    let doc: Value = serde_json::from_str(content).ok()?;
+    // Guard against a stale/other request under the same key.
+    if doc.get("action_id").and_then(Value::as_str) != Some(action_id) {
+        return None;
+    }
+    let resolution = doc.get("resolution")?;
+    if resolution.is_null() {
+        return None;
+    }
+    // The app writes `resolution` as a bare Core ApprovalState string ("Approved", ...).
+    resolution.as_str().map(str::to_string)
+}
+
+/// The approval long-poll interval in millis (`SPECTTY_APPROVAL_POLL_MS`, default
+/// [`APPROVAL_POLL_MS`]).
+fn approval_poll_ms() -> u64 {
+    std::env::var("SPECTTY_APPROVAL_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(APPROVAL_POLL_MS)
+}
+
+/// The bounded long-poll attempt budget (`SPECTTY_APPROVAL_MAX_POLLS`, default
+/// [`APPROVAL_MAX_POLLS`]).
+fn approval_max_polls() -> u32 {
+    std::env::var("SPECTTY_APPROVAL_MAX_POLLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(APPROVAL_MAX_POLLS)
 }
 
 /// The benign stub acknowledgement for tools whose effects have not yet landed.
@@ -366,12 +554,18 @@ fn tool_schemas() -> Vec<Value> {
     ]
 }
 
-/// The thin engram write seam (D16). The MCP binary only ever UPSERTS observations
-/// (it pushes spec/diff/status/cost out); it never reads back. Sync signature — the real
+/// The thin engram HTTP seam (D16). The MCP binary UPSERTS observations (it pushes
+/// spec/diff/status/cost out) and — for the one BLOCKING tool, `spectty_approval` (D31) —
+/// READS one back while long-polling for the user's resolution. Sync signatures — the real
 /// impl uses `reqwest::blocking`, so no `async`/`tokio` leaks into this stdio binary.
 pub trait EngramClient {
     /// Create-or-update the observation under `topic_key` with `content`.
     fn upsert(&self, topic_key: &str, content: &str) -> Result<(), EngramClientError>;
+
+    /// Read the latest observation `content` for `topic_key`, or `None` when absent. Used
+    /// ONLY by the `spectty_approval` long-poll (D31): the handler upserts a pending request
+    /// then polls `get` on the same key until the app writes back a resolution.
+    fn get(&self, topic_key: &str) -> Result<Option<String>, EngramClientError>;
 }
 
 /// Failure modes of an [`EngramClient`] upsert. The effect maps this to a benign error
@@ -391,6 +585,10 @@ struct NoopEngramClient;
 impl EngramClient for NoopEngramClient {
     fn upsert(&self, _topic_key: &str, _content: &str) -> Result<(), EngramClientError> {
         Ok(())
+    }
+
+    fn get(&self, _topic_key: &str) -> Result<Option<String>, EngramClientError> {
+        Ok(None)
     }
 }
 
@@ -481,6 +679,49 @@ impl EngramClient for ReqwestEngramClient {
             )))
         }
     }
+
+    fn get(&self, topic_key: &str) -> Result<Option<String>, EngramClientError> {
+        // Mirror the EngramAdapter's G1-verified read: `?topic_key=` is NOT honored
+        // server-side, so fetch the list and filter CLIENT-SIDE (case-insensitive — the
+        // server lowercases topic keys), picking the most recently updated matching row.
+        let resp = self
+            .client
+            .get(format!("{}/observations", self.base_url))
+            .send()
+            .map_err(|e| EngramClientError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(EngramClientError::Transport(format!(
+                "GET /observations returned {}",
+                resp.status()
+            )));
+        }
+        let rows: Vec<RawObs> = resp
+            .json()
+            .map_err(|e| EngramClientError::Transport(e.to_string()))?;
+        let wanted = topic_key.to_ascii_lowercase();
+        let latest = rows
+            .into_iter()
+            .filter(|r| {
+                r.topic_key
+                    .as_deref()
+                    .map(|t| t.eq_ignore_ascii_case(&wanted))
+                    .unwrap_or(false)
+            })
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+            .map(|r| r.content);
+        Ok(latest)
+    }
+}
+
+/// A single observation row as returned by `GET /observations` (the subset the approval
+/// long-poll reads). Mirrors the adapter's `RawObs`; `topic_key` is optional because the
+/// list may carry rows written without one.
+#[derive(serde::Deserialize)]
+struct RawObs {
+    topic_key: Option<String>,
+    content: String,
+    #[serde(default)]
+    updated_at: String,
 }
 
 fn success_response(id: Value, result: Value) -> String {
@@ -495,9 +736,17 @@ fn error_response(id: Value, code: i64, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
 
     use super::*;
+
+    /// Serializes the env-var-driven approval tests: `approval_poll_ms`/`approval_max_polls`
+    /// read process-global env vars, so concurrent tests that set them would race. Each such
+    /// test holds this lock while it mutates and reads the vars.
+    fn approval_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     /// Parse a response line back into a `Value` for assertions.
     fn response_of(request: &str) -> Value {
@@ -542,6 +791,15 @@ mod tests {
                 .unwrap()
                 .insert(topic_key.to_string(), content.to_string());
             Ok(())
+        }
+
+        fn get(&self, topic_key: &str) -> Result<Option<String>, EngramClientError> {
+            if self.fail {
+                return Err(EngramClientError::Transport(
+                    "fake: engram down".to_string(),
+                ));
+            }
+            Ok(self.store.lock().unwrap().get(topic_key).cloned())
         }
     }
 
@@ -798,13 +1056,10 @@ mod tests {
     /// seam — proving the dispatch only routed `spectty_spec` to an effect.
     #[test]
     fn non_spec_tools_keep_stub_ack() {
+        // `spectty_spec` (WU-4) and `spectty_approval` (WU-5) now have real effects; the
+        // remaining three keep the benign stub ack until their effects land.
         let engram = FakeEngramClient::new();
-        for name in [
-            "spectty_diff",
-            "spectty_approval",
-            "spectty_status",
-            "spectty_cost",
-        ] {
+        for name in ["spectty_diff", "spectty_status", "spectty_cost"] {
             let req = format!(
                 r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"{name}","arguments":{{"session_id":"s"}}}}}}"#
             );
@@ -812,6 +1067,386 @@ mod tests {
             assert_eq!(resp["result"]["isError"], false, "{name} must ack");
             assert!(engram.get("spectty/s/spec").is_none());
         }
+    }
+
+    // ── M4 WU-5: spectty_approval blocking long-poll resolver ─────────────────────────
+
+    /// A fake that records upserts (so the pending registration is assertable) and, on
+    /// `get`, returns a RESOLVED document for the addressed action — simulating the app's
+    /// `approve_prompt` having written the resolution back concurrently. This lets the
+    /// blocking long-poll resolve on its FIRST read with no real sleeping.
+    struct ResolvingEngramClient {
+        store: Mutex<HashMap<String, String>>,
+        decision: String,
+    }
+
+    impl ResolvingEngramClient {
+        fn new(decision: &str) -> Self {
+            Self {
+                store: Mutex::new(HashMap::new()),
+                decision: decision.to_string(),
+            }
+        }
+
+        fn stored(&self, topic_key: &str) -> Option<String> {
+            self.store.lock().unwrap().get(topic_key).cloned()
+        }
+    }
+
+    impl EngramClient for ResolvingEngramClient {
+        fn upsert(&self, topic_key: &str, content: &str) -> Result<(), EngramClientError> {
+            self.store
+                .lock()
+                .unwrap()
+                .insert(topic_key.to_string(), content.to_string());
+            Ok(())
+        }
+
+        fn get(&self, topic_key: &str) -> Result<Option<String>, EngramClientError> {
+            // Reflect the pending document the handler upserted, but with `resolution` set —
+            // exactly what the app writes via approve_prompt.
+            let pending = self.store.lock().unwrap().get(topic_key).cloned();
+            Ok(pending.map(|content| {
+                let mut doc: Value = serde_json::from_str(&content).expect("stored doc is JSON");
+                doc["resolution"] = json!(self.decision);
+                doc.to_string()
+            }))
+        }
+    }
+
+    /// PR-3 Finding 4: an [`EngramClient`] whose `get` fails (transport) a fixed number of
+    /// times, then returns a RESOLVED document. Models a transient blip (e.g. the 2s client
+    /// timeout firing once) inside an otherwise-healthy long-poll. `upsert` always succeeds so
+    /// the pending registration lands.
+    struct FlakyGetEngramClient {
+        store: Mutex<HashMap<String, String>>,
+        decision: String,
+        remaining_failures: Mutex<u32>,
+    }
+
+    impl FlakyGetEngramClient {
+        fn new(fail_times: u32, decision: &str) -> Self {
+            Self {
+                store: Mutex::new(HashMap::new()),
+                decision: decision.to_string(),
+                remaining_failures: Mutex::new(fail_times),
+            }
+        }
+    }
+
+    impl EngramClient for FlakyGetEngramClient {
+        fn upsert(&self, topic_key: &str, content: &str) -> Result<(), EngramClientError> {
+            self.store
+                .lock()
+                .unwrap()
+                .insert(topic_key.to_string(), content.to_string());
+            Ok(())
+        }
+
+        fn get(&self, topic_key: &str) -> Result<Option<String>, EngramClientError> {
+            {
+                let mut left = self.remaining_failures.lock().unwrap();
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(EngramClientError::Transport(
+                        "fake: transient blip".to_string(),
+                    ));
+                }
+            }
+            let pending = self.store.lock().unwrap().get(topic_key).cloned();
+            Ok(pending.map(|content| {
+                let mut doc: Value = serde_json::from_str(&content).expect("stored doc is JSON");
+                doc["resolution"] = json!(self.decision);
+                doc.to_string()
+            }))
+        }
+    }
+
+    /// PR-3 Finding 4: a couple of transient `get` failures inside the budget must NOT abort
+    /// the long-poll. With a tolerance of N consecutive failures, two blips then a resolution
+    /// still resolves the approval (the counter resets on the eventual success).
+    #[test]
+    fn spectty_approval_tolerates_transient_get_failures_then_resolves() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "10");
+        // Fail twice (< the tolerance of 3), then resolve.
+        let engram = FlakyGetEngramClient::new(2, "Approved");
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+
+        assert!(resp.get("error").is_none());
+        assert_eq!(
+            resp["result"]["isError"], false,
+            "transient blips inside tolerance must not abort the poll"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Approved"),
+            "the approval still resolves after transient blips: {text}"
+        );
+    }
+
+    /// PR-3 Finding 4: N+ CONSECUTIVE transient failures surface the engram-unavailable error
+    /// (the poll gives up only after the tolerance is exhausted, not on the first blip).
+    #[test]
+    fn spectty_approval_surfaces_error_after_consecutive_get_failures() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "10");
+        // Fail more than the tolerance (3) consecutively → never resolves, surfaces error.
+        let engram = FlakyGetEngramClient::new(50, "Approved");
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+
+        assert!(resp.get("error").is_none());
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "consecutive failures beyond tolerance must surface the transport error"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("engram unavailable"),
+            "exhausted tolerance reports engram unavailable: {text}"
+        );
+    }
+
+    /// PR-3 Finding 4 (unit): `poll_for_resolution` tolerates transient failures up to the
+    /// limit and resets the counter on a successful read. Driven directly over the seam.
+    #[test]
+    fn poll_for_resolution_resets_failure_counter_on_success() {
+        // Fails twice (within tolerance 3), then resolves → Ok(Some).
+        let engram = FlakyGetEngramClient::new(2, "Approved");
+        engram
+            .upsert(
+                "spectty/42/approval",
+                r#"{"action_id":"edit-1","options":[],"resolution":null}"#,
+            )
+            .unwrap();
+        let got = poll_for_resolution(&engram, "spectty/42/approval", "edit-1", 10, Duration::ZERO);
+        assert_eq!(got.unwrap().as_deref(), Some("Approved"));
+
+        // Fails beyond tolerance consecutively → Err surfaces (poll aborts).
+        let down = FlakyGetEngramClient::new(50, "Approved");
+        down.upsert(
+            "spectty/42/approval",
+            r#"{"action_id":"edit-1","options":[],"resolution":null}"#,
+        )
+        .unwrap();
+        let err = poll_for_resolution(&down, "spectty/42/approval", "edit-1", 10, Duration::ZERO);
+        assert!(matches!(err, Err(EngramClientError::Transport(_))));
+    }
+
+    /// WU-5.1: a `spectty_approval` call registers EXACTLY ONE pending request keyed
+    /// `(session_id, action_id)` carrying the `options` (the status path derives
+    /// `quick_actions` from these). The pending doc has a null resolution.
+    #[test]
+    fn spectty_approval_registers_pending_with_options() {
+        let _env = approval_env_lock().lock().unwrap();
+        // A non-resolving fake so we can inspect the PENDING document before any resolution.
+        // Use a bounded budget of 1 poll + zero interval so the handler returns promptly
+        // (still pending) without sleeping.
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "1");
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        let engram = FakeEngramClient::new();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1",
+                   "description":"rm -rf","risk_level":"high",
+                   "options":["approve","reject"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+
+        assert!(
+            resp.get("error").is_none(),
+            "a valid call is not an RPC error"
+        );
+
+        let stored = engram
+            .get("spectty/42/approval")
+            .expect("a pending request must be registered under the canonical key");
+        let doc: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(doc["action_id"], "edit-1");
+        assert_eq!(doc["options"], json!(["approve", "reject"]));
+        assert!(
+            doc["resolution"].is_null(),
+            "a freshly registered request is pending (null resolution)"
+        );
+    }
+
+    /// WU-5.2: a duplicate `(session_id, action_id)` registration is idempotent — exactly one
+    /// pending entry for the key (the second upsert overwrites with identical pending
+    /// content).
+    #[test]
+    fn spectty_approval_duplicate_request_is_idempotent() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "1");
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        let engram = FakeEngramClient::new();
+        let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["a"]}}}"#;
+        response_with(req, &engram);
+        let first = engram.get("spectty/42/approval").unwrap();
+        response_with(req, &engram);
+        let second = engram.get("spectty/42/approval").unwrap();
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+
+        assert_eq!(
+            first, second,
+            "a duplicate registration must leave a single, unchanged pending entry"
+        );
+    }
+
+    /// WU-5.3: the blocking long-poll observes a resolution written back to the same key and
+    /// returns it to the agent (non-error). The resolution is the canonical Core
+    /// `ApprovalState` string the app wrote.
+    #[test]
+    fn spectty_approval_long_poll_returns_resolution() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        let engram = ResolvingEngramClient::new("Approved");
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Approved"),
+            "the resolution decision must be returned to the agent: {text}"
+        );
+        // The pending request was registered before the long-poll resolved.
+        assert!(engram.stored("spectty/42/approval").is_some());
+    }
+
+    /// WU-5.6: the bounded long-poll returns a `pending` (timeout) result rather than hanging
+    /// when no resolution ever arrives — the agent's turn ends, it does not block forever.
+    #[test]
+    fn spectty_approval_times_out_to_pending_without_hanging() {
+        let _env = approval_env_lock().lock().unwrap();
+        std::env::set_var("SPECTTY_APPROVAL_MAX_POLLS", "2");
+        std::env::set_var("SPECTTY_APPROVAL_POLL_MS", "0");
+        let engram = FakeEngramClient::new(); // never resolves
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        std::env::remove_var("SPECTTY_APPROVAL_MAX_POLLS");
+        std::env::remove_var("SPECTTY_APPROVAL_POLL_MS");
+
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("pending"),
+            "a timed-out approval reports pending: {text}"
+        );
+    }
+
+    /// WU-5.6: a malformed `spectty_approval` payload (missing `action_id`) is rejected as
+    /// `-32602` without registering anything — no crash.
+    #[test]
+    fn spectty_approval_malformed_payload_is_rejected() {
+        let engram = FakeEngramClient::new();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+                 "name":"spectty_approval","arguments":{"session_id":"42"}}}"#,
+            &engram,
+        );
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+        assert!(engram.get("spectty/42/approval").is_none());
+    }
+
+    /// WU-5.6: when engram is unreachable the blocking tool DEGRADES to a benign error result
+    /// instead of panicking — a down daemon must not break the agent's turn.
+    #[test]
+    fn spectty_approval_degrades_when_engram_down() {
+        let engram = FakeEngramClient::failing();
+        let resp = response_with(
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{
+                 "name":"spectty_approval",
+                 "arguments":{"session_id":"42","action_id":"edit-1","options":["approve"]}}}"#,
+            &engram,
+        );
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// `resolution_of` only returns a decision for the addressed action and only when
+    /// resolved — a pending or mismatched document yields `None`.
+    #[test]
+    fn resolution_of_matches_action_and_requires_resolution() {
+        let pending = r#"{"action_id":"edit-1","options":[],"resolution":null}"#;
+        assert_eq!(resolution_of(pending, "edit-1"), None);
+
+        let resolved = r#"{"action_id":"edit-1","options":[],"resolution":"Approved"}"#;
+        assert_eq!(
+            resolution_of(resolved, "edit-1").as_deref(),
+            Some("Approved")
+        );
+
+        // A resolution for a DIFFERENT action under the same key is ignored.
+        assert_eq!(resolution_of(resolved, "other"), None);
+
+        // Garbage degrades to None (no panic).
+        assert_eq!(resolution_of("{not json", "edit-1"), None);
+    }
+
+    /// PR-3 Finding 1 (MAJOR), MIRROR direction of the cross-seam contract. The Tauri
+    /// `approve_prompt` serializes an `ApprovalRequest` with a `resolution` set to a canonical
+    /// Core `ApprovalState` string. We replicate that EXACT Tauri-serialized resolved document
+    /// as a JSON literal (src-tauri/src/commands/spec.rs `ApprovalRequest` serde shape —
+    /// `risk_level` is `skip_serializing_if = "Option::is_none"`, so a resolved doc may OMIT
+    /// it) and feed it into the REAL `resolution_of` parser. This proves the MCP long-poll
+    /// unblocks on what the app actually writes — the seam the PR-2 blocker class missed.
+    #[test]
+    fn tauri_resolved_doc_unblocks_the_mcp_long_poll() {
+        // EXACT shape the Tauri ApprovalRequest serializes once resolved (Approved). Note the
+        // omitted `risk_level` (skip_serializing_if) and the bare Core ApprovalState string.
+        let tauri_resolved_approved = r#"{"action_id":"edit-1","description":"delete the prod database","options":["approve","reject"],"resolution":"Approved"}"#;
+        assert_eq!(
+            resolution_of(tauri_resolved_approved, "edit-1").as_deref(),
+            Some("Approved"),
+            "the MCP long-poll MUST unblock on the Tauri-serialized resolved doc"
+        );
+        // The same doc is invisible under a different action_id (no false unblock).
+        assert_eq!(resolution_of(tauri_resolved_approved, "other"), None);
+
+        // The Adjusted variant must also unblock the long-poll with the canonical string.
+        let tauri_resolved_adjusted = r#"{"action_id":"plan-1","description":"steer the plan","options":["adjust"],"resolution":"Adjusted"}"#;
+        assert_eq!(
+            resolution_of(tauri_resolved_adjusted, "plan-1").as_deref(),
+            Some("Adjusted"),
+            "the MCP long-poll MUST unblock on an Adjusted resolution"
+        );
+
+        // A still-pending Tauri doc (resolution:null, risk_level present) keeps the poll blocked.
+        let tauri_pending = r#"{"action_id":"edit-1","description":"d","risk_level":"high","options":[],"resolution":null}"#;
+        assert_eq!(resolution_of(tauri_pending, "edit-1"), None);
     }
 
     /// The byte-frozen `tools/list` schema fixture (M3-swap contract). If a deliberate
