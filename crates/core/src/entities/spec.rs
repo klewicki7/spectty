@@ -41,9 +41,8 @@ pub enum TaskState {
 }
 
 impl TaskState {
-    /// PURE one-way transition. Returns the next state for a legal move, or
-    /// [`SpecError::IllegalTransition`] for an illegal one (the caller's state is left
-    /// unchanged — the error carries the rejected pair).
+    /// PURE one-way transition. Returns the next state for a legal move, or `self`
+    /// UNCHANGED for an illegal one — an illegal move is IGNORED, never an error.
     ///
     /// Legal edges (and ONLY these):
     /// - `Pending → InProgress`
@@ -51,16 +50,27 @@ impl TaskState {
     /// - `InProgress → Done`
     /// - `InProgress → Skipped`
     ///
-    /// `Done` and `Skipped` are TERMINAL: any move out of them is illegal. Backward moves
+    /// `Done` and `Skipped` are TERMINAL: any move out of them is ignored. Backward moves
     /// (`InProgress → Pending`, `Done → InProgress`) and illegal jumps (`Pending → Done`)
-    /// are rejected. The function is total, deterministic, and side-effect free.
-    pub fn transition(self, to: TaskState) -> Result<TaskState, SpecError> {
+    /// leave the state unchanged. The function is total, deterministic, and side-effect
+    /// free.
+    ///
+    /// # Why infallible (Finding 2, PR-2 review)
+    ///
+    /// The binding spec scenarios mandate that an illegal backward transition is "ignored,
+    /// not an error — the task MUST remain done", explicitly mirroring the infallible
+    /// [`agent_status::transition`](crate::entities::agent_status::transition). Progress
+    /// updates arrive from an EXTERNAL agent, so an illegal move must degrade gracefully
+    /// (stay put) rather than error. The spec is authoritative over the earlier D32/D33
+    /// `Result` sketch; see the design amendment under D32/D33.
+    #[must_use]
+    pub fn transition(self, to: TaskState) -> TaskState {
         use TaskState::{Done, InProgress, Pending, Skipped};
         match (self, to) {
-            (Pending, InProgress | Skipped) => Ok(to),
-            (InProgress, Done | Skipped) => Ok(to),
-            // Everything else — terminal source, backward move, or illegal jump.
-            (from, to) => Err(SpecError::IllegalTransition { from, to }),
+            (Pending, InProgress | Skipped) => to,
+            (InProgress, Done | Skipped) => to,
+            // Everything else — terminal source, backward move, or illegal jump: IGNORED.
+            _ => self,
         }
     }
 }
@@ -161,16 +171,18 @@ impl SpecContract {
         matches!(self.approval, ApprovalState::Approved) || self.dev_override
     }
 
-    /// Advance a task to `to`, enforcing BOTH the one-way [`TaskState::transition`] rule
-    /// AND the plan-approval gate (D33): moving a task to [`TaskState::InProgress`] while
-    /// the plan is not yet approved is rejected with [`SpecError::GateNotApproved`].
+    /// Advance a task to `to`, applying the one-way [`TaskState::transition`] rule AND the
+    /// plan-approval gate (D33): moving a task to [`TaskState::InProgress`] while the plan
+    /// is not yet approved is rejected with [`SpecError::GateNotApproved`].
     ///
-    /// On success the task's state is updated in place and a [`TaskProgress`] entry is
-    /// appended. An unknown `task_id` is [`SpecError::UnknownTask`].
+    /// The gate violation IS an error; an illegal task-state move is NOT (Finding 2): it is
+    /// ignored, leaving the task unchanged and recording no progress. A genuine advance
+    /// updates the task in place and appends a [`TaskProgress`] entry. An unknown `task_id`
+    /// is [`SpecError::UnknownTask`].
     pub fn apply_progress(&mut self, task_id: &str, to: TaskState) -> Result<(), SpecError> {
-        // Gate FIRST: beginning work (→ InProgress) requires an approved plan. Checked
-        // before the transition so an unapproved "start" is rejected as a gate error, not
-        // masked by a transition error.
+        // Gate FIRST: beginning work (→ InProgress) requires an approved plan. The gate is
+        // a separate, hard rule (D33) — its violation stays an error, distinct from the
+        // infallible task-state machine below.
         if to == TaskState::InProgress && !self.may_begin_edits() {
             return Err(SpecError::GateNotApproved);
         }
@@ -179,7 +191,11 @@ impl SpecContract {
             .iter_mut()
             .find(|t| t.id == task_id)
             .ok_or_else(|| SpecError::UnknownTask(task_id.to_string()))?;
-        let next = task.state.transition(to)?;
+        let next = task.state.transition(to);
+        // An illegal move is ignored (next == current): no state change, no progress entry.
+        if next == task.state {
+            return Ok(());
+        }
         task.state = next;
         self.progress.push(TaskProgress {
             task_id: task_id.to_string(),
@@ -190,16 +206,13 @@ impl SpecContract {
 }
 
 /// Errors from the pure spec rules (D32/D33). `thiserror` only — no I/O concerns.
+///
+/// Note (Finding 2): an illegal [`TaskState::transition`] is NOT an error — it is ignored
+/// (the task keeps its state), mirroring the infallible `AgentStatus::transition`. So this
+/// enum carries ONLY the plan-approval gate violation and the unknown-task lookup error,
+/// both of which are genuine caller errors distinct from a no-op state move.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SpecError {
-    /// A [`TaskState::transition`] that violates the one-way state machine.
-    #[error("illegal task transition: {from:?} -> {to:?}")]
-    IllegalTransition {
-        /// The source state.
-        from: TaskState,
-        /// The rejected target state.
-        to: TaskState,
-    },
     /// A task was moved to `InProgress` while the plan-approval gate was not satisfied.
     #[error("plan not approved: edits may not begin until the plan is Approved")]
     GateNotApproved,
@@ -233,42 +246,41 @@ mod tests {
         }
     }
 
-    // WU-3.1: the one-directional legal-transition table.
+    // WU-3.1: the one-directional legal-transition table. Finding 2 (PR-2 review): the
+    // binding spec scenarios mandate that an illegal transition is IGNORED, not an error —
+    // the task keeps its current state, mirroring the infallible `AgentStatus::transition`.
     #[test]
     fn task_state_transition_legal_table() {
         use TaskState::{Done, InProgress, Pending, Skipped};
 
-        // Legal forward edges.
-        assert_eq!(Pending.transition(InProgress), Ok(InProgress));
-        assert_eq!(Pending.transition(Skipped), Ok(Skipped));
-        assert_eq!(InProgress.transition(Done), Ok(Done));
-        assert_eq!(InProgress.transition(Skipped), Ok(Skipped));
+        // Legal forward edges advance to the target.
+        assert_eq!(Pending.transition(InProgress), InProgress);
+        assert_eq!(Pending.transition(Skipped), Skipped);
+        assert_eq!(InProgress.transition(Done), Done);
+        assert_eq!(InProgress.transition(Skipped), Skipped);
 
-        // Illegal jump: Pending -> Done skips InProgress.
-        assert_eq!(
-            Pending.transition(Done),
-            Err(SpecError::IllegalTransition {
-                from: Pending,
-                to: Done
-            })
-        );
+        // Illegal jump: Pending -> Done skips InProgress → IGNORED, stays Pending.
+        assert_eq!(Pending.transition(Done), Pending);
 
-        // Backward moves are illegal.
-        assert!(InProgress.transition(Pending).is_err());
-        assert!(Done.transition(InProgress).is_err());
+        // Backward moves are ignored: the task keeps its current state (spec: "the task
+        // MUST remain done", mirroring AgentStatus).
+        assert_eq!(InProgress.transition(Pending), InProgress);
+        assert_eq!(Done.transition(InProgress), Done);
 
-        // Done and Skipped are TERMINAL: any move out is illegal.
+        // Done and Skipped are TERMINAL: any move out is ignored (stays put).
         for to in [Pending, InProgress, Done, Skipped] {
             if to != Done {
-                assert!(
-                    Done.transition(to).is_err(),
-                    "Done is terminal; Done -> {to:?} must be illegal"
+                assert_eq!(
+                    Done.transition(to),
+                    Done,
+                    "Done is terminal; Done -> {to:?} must be ignored (stays Done)"
                 );
             }
             if to != Skipped {
-                assert!(
-                    Skipped.transition(to).is_err(),
-                    "Skipped is terminal; Skipped -> {to:?} must be illegal"
+                assert_eq!(
+                    Skipped.transition(to),
+                    Skipped,
+                    "Skipped is terminal; Skipped -> {to:?} must be ignored (stays Skipped)"
                 );
             }
         }
@@ -425,30 +437,32 @@ mod tests {
         }
     }
 
-    // Triangulation for apply_progress: an unknown task id is a distinct error, and an
-    // illegal transition (even when the gate is open and not an InProgress move) is
-    // surfaced as IllegalTransition.
+    // Triangulation for apply_progress: an unknown task id is a distinct error; an illegal
+    // task-state move is IGNORED (Finding 2) — the task keeps its state and NO progress is
+    // recorded (a no-op move is not progress). Gate violations remain errors (tested
+    // above); task-state illegality is not an error.
     #[test]
     fn apply_progress_unknown_task_and_illegal_transition() {
         let mut approved =
             contract_with(ApprovalState::Approved, vec![task("t1", TaskState::Done)]);
 
-        // Unknown task id.
+        // Unknown task id is still a distinct error (the contract knows nothing about it).
         assert_eq!(
             approved.apply_progress("nope", TaskState::Skipped),
             Err(SpecError::UnknownTask("nope".to_string()))
         );
 
-        // t1 is Done (terminal): moving it to Skipped is an illegal transition, not a gate
-        // error (Skipped does not hit the InProgress gate).
+        // t1 is Done (terminal): moving it to Skipped is an illegal move that is IGNORED,
+        // not an error. The task stays Done and no progress is recorded.
+        assert_eq!(approved.apply_progress("t1", TaskState::Skipped), Ok(()));
         assert_eq!(
-            approved.apply_progress("t1", TaskState::Skipped),
-            Err(SpecError::IllegalTransition {
-                from: TaskState::Done,
-                to: TaskState::Skipped
-            })
+            approved.tasks[0].state,
+            TaskState::Done,
+            "an illegal move must leave the task unchanged (stays Done)"
         );
-        // No progress recorded for either failed call.
-        assert!(approved.progress.is_empty());
+        assert!(
+            approved.progress.is_empty(),
+            "a no-op illegal move records no progress"
+        );
     }
 }
