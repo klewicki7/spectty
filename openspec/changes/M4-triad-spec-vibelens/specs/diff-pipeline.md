@@ -28,20 +28,28 @@ adapters/`src-tauri`; Core gains no new dependency.
 - **Then** both MUST round-trip unchanged AND `empty()` MUST represent "no diff to explain"
 
 ### Requirement: The diff pipeline hash-dedups and skips redundant explanations
-The pipeline MUST hash `git diff HEAD` and compare against the Session's `last_diff_hash`. Unchanged
-hash MUST skip `explain` (no redundant MCP call). Changed hash MUST call `explain`, update Session
-with the new `DiffExplanation` + hash, and emit `diff_updated`. Empty-repo MUST diff vs the empty tree;
-a truly empty diff MUST yield `DiffExplanation::empty()` with NO MCP call.
+The pipeline MUST hash `git diff HEAD` and compare against the **per-session diff pipeline's dedup
+state** (`last_hash`). Unchanged hash MUST skip `explain` (no redundant MCP call). Changed hash MUST
+call `explain`, store the new `DiffExplanation` + hash in the pipeline's dedup state, and emit
+`diff_updated`. Empty-repo MUST diff vs the empty tree; a truly empty diff MUST yield
+`DiffExplanation::empty()` with NO MCP call.
+
+> **PR-5 ownership note (reconciled).** The M4 design (D34/D37) sketched the dedup state living on the
+> `Session` aggregate (`Session.last_diff` / `last_diff_hash`, mutated via `Session::update_diff`).
+> The shipped pipeline keeps that dedup state (current explanation + hash) on the per-session
+> `DiffPipeline` in the bridge instead, which is behaviourally identical AND keeps Core untouched this
+> slice (R6 quarantine). The Core `Session.last_diff` / `last_diff_hash` fields remain as Core capacity
+> for the future session-registry diff wiring (M5 dashboard). See `design.md` D37 amendment.
 
 #### Scenario: An unchanged diff hash skips the explainer
-- **Given** a Session whose `last_diff_hash` equals the current diff hash
+- **Given** a per-session diff pipeline whose cached `last_hash` equals the current diff hash
 - **When** the pipeline runs
 - **Then** `explain` MUST NOT be called AND no `diff_updated` MUST be emitted
 
 #### Scenario: A changed diff hash explains and emits once
-- **Given** a Session whose `last_diff_hash` differs from the current diff hash
+- **Given** a per-session diff pipeline whose cached `last_hash` differs from the current diff hash
 - **When** the pipeline runs over a fake `DiffExplainerPort`
-- **Then** `explain` MUST be called once, the Session MUST store the new explanation + hash, AND
+- **Then** `explain` MUST be called once, the pipeline MUST store the new explanation + hash, AND
   EXACTLY ONE `diff_updated { session_id, explanation }` MUST be emitted
 
 #### Scenario: A truly empty diff yields empty() with no MCP call

@@ -47,9 +47,18 @@ pub struct Session {
 impl Session {
     /// Store a freshly computed diff explanation and its hash (D34).
     ///
-    /// The pipeline calls this only after confirming `hash` differs from
-    /// [`last_diff_hash`](Self::last_diff_hash) (hash-dedup), so this method unconditionally
-    /// overwrites both fields. It is a pure mutation — no I/O, no eventing.
+    /// This is a pure mutation — no I/O, no eventing — intended to be called only after the
+    /// caller confirms `hash` differs from [`last_diff_hash`](Self::last_diff_hash)
+    /// (hash-dedup), so it unconditionally overwrites both fields.
+    ///
+    /// **Ownership note (PR-5, M4 review F1).** Production diff dedup does NOT flow through
+    /// this method today: the shipped per-session diff pipeline
+    /// (`src-tauri/src/diff_pipeline.rs`) owns its own dedup state (current explanation +
+    /// hash) to keep Core untouched in the VibeLens slice (R6 quarantine). These fields +
+    /// this method remain as Core capacity; the production wiring that mutates `Session` here
+    /// arrives with the session-registry diff surface (M5 dashboard). See `design.md` D37
+    /// amendment. (Not dead in the compiler sense — the fields are `pub` serde fields and
+    /// `update_diff` is exercised by the Core unit test below.)
     pub fn update_diff(&mut self, explanation: DiffExplanation, hash: u64) {
         self.last_diff = Some(explanation);
         self.last_diff_hash = Some(hash);

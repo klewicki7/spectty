@@ -551,6 +551,10 @@ no-op FIRST (fake engram round-trip; bounded long-poll).
 - [x] 8.11 GREEN: added the `#[ignore]` `vibelens_real_npx_show_diff_explanation` test — asserts
   the built explanation is returned (the push degrades gracefully without `npx`); un-ignore to
   verify the WRITE envelope against the live server (G2). `[M4-REQ-12]` `[manual][D36]`
+- [ ] follow-up: `changed_files` does not parse quoted git paths (spaces) — files omitted from the
+  list; handle `diff --git "a/x y" "b/x y"` quoted form (PR-5 review F3, deferred — `vibelens.rs`
+  `changed_files` only splits on ` b/`, so a path containing a space inside a quoted header is dropped
+  from the annotations; the explanation summary line-counts are unaffected).
 - [x] **Gate (WU-8)**: `cargo test --workspace` green (tauri lib 86 incl. 8 diff_pipeline; adapters
   157 +2ign incl. 6 vibelens +1ign; mcp 33 incl. 5 spectty_diff; core 52 unchanged — Core
   quarantine intact); fmt clean; clippy `-D warnings` exit 0; `cargo deny ... check bans` → `bans

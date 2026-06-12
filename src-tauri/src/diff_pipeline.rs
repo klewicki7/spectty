@@ -504,6 +504,90 @@ mod tests {
         );
     }
 
+    // ── F4 (PR-5 review) — app-side cross-seam fixture test for the `spectty_diff` trigger
+    //    doc. The MCP side pins the trigger-doc SHAPE (spectty-mcp wire test); this pins the
+    //    APP side: the EXACT JSON literal the MCP `spectty_diff` effect upserts to
+    //    `spectty/{sid}/diff` (session_id + hint + nonce) must, when driven through the real
+    //    PortPollReader + SpecBus poll seam ONE tick, fire the diff pipeline — and a SECOND
+    //    distinct-nonce doc must fire it AGAIN (the consume-once/nonce contract: a rapid
+    //    re-edit with the same hint still re-triggers because the nonce makes the doc differ).
+    //
+    //    The trigger doc literal is copied from crates/spectty-mcp/src/main.rs (the
+    //    `spectty_diff_effect` `trigger` json!{} at ~:235-239), INCLUDING the `nonce` field.
+    #[test]
+    fn spectty_diff_trigger_doc_drives_pipeline_through_app_poll_seam() {
+        use crate::spec_bus::{PollReader, PortPollReader, SpecBus};
+        use spectty_adapters::InMemoryPersistenceAdapter;
+        use spectty_core::ports::PersistencePort;
+
+        let sid = "s-cross-seam";
+        let topic_key = format!("spectty/{sid}/diff");
+
+        // The exact trigger-doc shape the MCP `spectty_diff` effect writes (session_id + hint
+        // + nonce). The nonce is what makes a back-to-back same-hint trigger a distinct doc.
+        let trigger_doc = |nonce: &str| {
+            serde_json::json!({
+                "session_id": sid,
+                "hint": "edited src/lib.rs",
+                "nonce": nonce,
+            })
+            .to_string()
+        };
+
+        // The app side: a PortPollReader + SpecBus over the SAME persistence the MCP effect
+        // upserts into, plus the per-session pipeline the poll's emit closure runs.
+        let adapter = Arc::new(InMemoryPersistenceAdapter::new());
+        let port: Arc<dyn PersistencePort> = adapter.clone();
+        let reader: Arc<dyn PollReader> = Arc::new(PortPollReader::new(port.clone()));
+        let mut bus = SpecBus::new(reader, topic_key.clone());
+
+        let pipeline: SharedPipeline = Arc::new(DiffPipeline::new(sid, "/ws"));
+        // A diff that changes between the two triggers so each fired run actually emits
+        // (the trigger doc only SIGNALS "go look"; the pipeline reads git itself).
+        let git = Mutex::new(FakeGit::ok("diff --git a/f.rs b/f.rs\n+one\n"));
+        let explainer = FakeExplainer::new();
+        let mut emitted: Vec<DiffUpdated> = Vec::new();
+        let mut runs = 0usize;
+
+        // One poll-tick driver: on a detected change, run the pipeline once (this is exactly
+        // what the production cooperative poll loop's emit closure does — minus spawn_blocking).
+        let tick = |bus: &mut SpecBus,
+                    git: &Mutex<FakeGit>,
+                    runs: &mut usize,
+                    emitted: &mut Vec<DiffUpdated>| {
+            bus.poll(&mut |_change| {
+                *runs += 1;
+                let g = git.lock().unwrap();
+                pipeline.run_once(&*g, &explainer, &mut |e| emitted.push(e));
+            });
+        };
+
+        // No trigger doc yet → poll is a no-op (the pipeline does not fire).
+        tick(&mut bus, &git, &mut runs, &mut emitted);
+        assert_eq!(runs, 0, "no trigger doc → pipeline must not fire");
+
+        // MCP `spectty_diff` upserts the trigger doc → the app poll detects it and fires.
+        port.upsert(&topic_key, trigger_doc("100")).unwrap();
+        tick(&mut bus, &git, &mut runs, &mut emitted);
+        assert_eq!(
+            runs, 1,
+            "the trigger doc must fire the pipeline exactly once"
+        );
+        assert_eq!(emitted.len(), 1, "the fired pipeline emitted diff_updated");
+
+        // A SECOND, DISTINCT-NONCE doc for the SAME hint (a rapid re-edit). Change the diff so
+        // the pipeline's own hash-dedup does not swallow the second fire — we are asserting the
+        // TRIGGER seam re-fires, which the nonce guarantees even for an identical hint.
+        *git.lock().unwrap() = FakeGit::ok("diff --git a/f.rs b/f.rs\n+one\n+two\n");
+        port.upsert(&topic_key, trigger_doc("200")).unwrap();
+        tick(&mut bus, &git, &mut runs, &mut emitted);
+        assert_eq!(
+            runs, 2,
+            "a distinct-nonce trigger doc must re-fire the pipeline (consume-once/nonce contract)"
+        );
+        assert_eq!(emitted.len(), 2, "the second fire emitted again");
+    }
+
     // WU-8.7: cooperative and generic triggers feed the SAME pipeline and the in-flight
     // guard makes a double-fire harmless. Two runs over the same shared pipeline with the
     // same diff: the first emits, the second dedups — exactly one emit total, regardless of
