@@ -17,10 +17,12 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use spectty_core::entities::diff::DiffExplanation;
 use spectty_core::ports::{PersistenceError, PersistencePort};
 use spectty_core::{ApprovalState, SpecContract};
 use tauri::State;
 
+use crate::diff_pipeline::DiffPipelines;
 use crate::spec_bus::Change;
 
 /// Managed Tauri state: the shared persistence port the spec pipeline reads through. In
@@ -36,6 +38,19 @@ pub fn get_spec(
     persistence: State<'_, SpecPersistence>,
 ) -> Result<Option<SpecContract>, String> {
     get_spec_impl(persistence.0.as_ref(), &session_id).map_err(|e| e.to_string())
+}
+
+/// `get_diff_explanation(session_id)` → the current [`DiffExplanation`] for the session, or
+/// `None` when the session has no diff pipeline or it has not produced an explanation yet
+/// (M4-REQ-16, D29). The VibeLens panel uses the on-demand read on (re-)attach and as the
+/// manual-refresh fallback; the live updates arrive via `diff_updated`. Reads from the
+/// in-process pipeline cache — never blocks on git or VibeLens.
+#[tauri::command]
+pub fn get_diff_explanation(
+    session_id: String,
+    pipelines: State<'_, DiffPipelines>,
+) -> Result<Option<DiffExplanation>, String> {
+    Ok(pipelines.current_explanation(&session_id))
 }
 
 /// The `spec_updated` event payload (D29): the session whose spec changed plus the new

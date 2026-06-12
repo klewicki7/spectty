@@ -52,6 +52,15 @@ pub struct PtyState {
     /// Sending `true` stops the Tokio `run_poll_loop` task at the next tick. `None` for
     /// raw `pty_spawn` PTYs that have no spec pipeline. Fired by [`shutdown`](Self::shutdown).
     pub spec_poll_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// Shutdown sender for this session's cooperative diff-trigger poll loop (M4 WU-8, D37).
+    /// Watches `spectty/{id}/diff`; sending `true` stops the Tokio task at the next tick.
+    /// `None` for raw `pty_spawn` PTYs. Fired by [`shutdown`](Self::shutdown).
+    pub diff_poll_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// The generic-tier file watcher guard (M4 WU-8, D35/D37). Dropping it stops the
+    /// `NotifyFileWatcher` thread cleanly (bounded join, no leak). `None` for cooperative
+    /// agents (which use the `spectty_diff` trigger instead) and raw `pty_spawn` PTYs.
+    /// Dropped by [`shutdown`](Self::shutdown).
+    pub diff_watch_guard: Option<Box<dyn spectty_core::ports::WatchGuard>>,
 }
 
 impl PtyState {
@@ -72,6 +81,13 @@ impl PtyState {
         if let Some(tx) = &self.spec_poll_shutdown {
             let _ = tx.send(true);
         }
+        // Stop the cooperative diff-trigger poll loop (M4 WU-8).
+        if let Some(tx) = &self.diff_poll_shutdown {
+            let _ = tx.send(true);
+        }
+        // Drop the generic-tier file watcher: its `Drop` joins the debounce thread cleanly
+        // (bounded, no leak). Taking it here makes shutdown idempotent.
+        self.diff_watch_guard.take();
         // Killing the child closes the slave; the master then reports EOF so a
         // read blocked in the dedicated thread returns and the loop exits.
         let _ = self.transport.kill();

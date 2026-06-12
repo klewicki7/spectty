@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod clock;
+pub mod diff;
 pub mod file_watch;
 pub mod git;
 pub mod hook;
@@ -17,6 +18,9 @@ pub mod pty;
 
 pub use agent::{AgentRunnerRegistry, ClaudeCodeRunner, GenericRunner, OutputSignalProducer};
 pub use clock::SystemClock;
+pub use diff::vibelens::{
+    build_explanation, changed_files, McpStdio, RealMcpStdio, VibeLensMcpAdapter,
+};
 pub use file_watch::{Debouncer, NotifyFileWatcher, NotifyWatchGuard};
 pub use git::GitCliAdapter;
 pub use hook::{
