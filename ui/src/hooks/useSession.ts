@@ -8,6 +8,7 @@ import {
   spawnSession,
   type AgentSpec,
   type AgentStatus,
+  type AgentTier,
   type SessionSummary,
 } from "../session/ipc";
 
@@ -15,6 +16,13 @@ import {
 export interface UseSession {
   session: SessionSummary | null;
   status: AgentStatus | null;
+  /**
+   * The cooperative tier of the live session's agent (`null` when none). The triad
+   * uses it to choose the structured checklist vs the coarse generic badge; it is
+   * retained from the spawned `AgentSpec` (the backend `SessionSummary` does not
+   * carry it).
+   */
+  tier: AgentTier | null;
   /** Non-null when the last spawn attempt rejected. Cleared on next spawn. */
   error: string | null;
   spawn: (
@@ -43,6 +51,7 @@ const DEFAULT_ROWS = 24;
 export function useSession(): UseSession {
   const [session, setSession] = useState<SessionSummary | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [tier, setTier] = useState<AgentTier | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // The live session id is mirrored in a ref so the event listeners (registered
@@ -68,6 +77,7 @@ export function useSession(): UseSession {
       if (id === sessionIdRef.current) {
         setSession(null);
         setStatus(null);
+        setTier(null);
       }
     }).then((unlisten) => unlisteners.push(unlisten));
 
@@ -101,6 +111,7 @@ export function useSession(): UseSession {
       // carry the full summary, but seeding here keeps the UI responsive.
       setSession({ id, title, status: "Starting", agent_kind: agent.kind });
       setStatus("Starting");
+      setTier(agent.tier);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -114,7 +125,8 @@ export function useSession(): UseSession {
     await closeSession(id);
     setSession(null);
     setStatus(null);
+    setTier(null);
   };
 
-  return { session, status, error, spawn, close };
+  return { session, status, tier, error, spawn, close };
 }

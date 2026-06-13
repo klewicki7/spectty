@@ -188,3 +188,183 @@ body,
   opacity: 0.5;
   cursor: default;
 }
+
+/* ── M4 Triad: Spec pane | Terminal | VibeLens panel (exit criterion 8) ──────── */
+
+/* Three regions side-by-side, all visible at once. `flex: 1` fills the remaining
+   app height below the Pane header; `min-height: 0` lets the terminal shrink so
+   xterm's fit() reads an accurate size. The terminal takes the bulk of the width;
+   the two side panels are fixed, scrollable rails. */
+.triad {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+}
+
+.triad__terminal {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.triad__spec,
+.triad__vibelens {
+  flex: 0 0 320px;
+  min-height: 0;
+  overflow-y: auto;
+  background: #1b1b1b;
+  color: #d4d4d4;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.triad__spec {
+  border-right: 1px solid #333;
+}
+
+.triad__vibelens {
+  border-left: 1px solid #333;
+}
+
+/* Spec pane: intent, the live task checklist, and the plan-approval gate. */
+.spec-pane,
+.vibelens-panel {
+  padding: 10px;
+}
+
+.spec-pane__intent {
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+
+.spec-pane__empty,
+.spec-pane__generic-badge,
+.vibelens-panel__loading,
+.vibelens-panel__empty {
+  color: #999;
+  font-style: italic;
+}
+
+.spec-pane__tasks,
+.vibelens-panel__files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.spec-task {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.spec-task__state {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+}
+
+.spec-task--done .spec-task__title {
+  color: #6fbf73;
+  text-decoration: line-through;
+}
+
+.spec-task--in_progress .spec-task__state {
+  color: #4f9dff;
+}
+
+.spec-task--skipped .spec-task__title {
+  color: #777;
+  text-decoration: line-through;
+}
+
+/* Plan-approval gate: Approve / Adjust / Reject. */
+.spec-pane__gate {
+  margin-top: 12px;
+  padding: 10px;
+  background: #2a2520;
+  border: 1px solid #5a4a2a;
+  border-radius: 4px;
+}
+
+.spec-pane__gate-prompt {
+  margin: 0 0 8px;
+}
+
+.spec-pane__gate button {
+  margin-right: 6px;
+  background: #3a3a3a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #d4d4d4;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.spec-pane__gate button:hover {
+  background: #4a4a4a;
+}
+
+/* VibeLens panel: a refresh bar, summary, and per-file rationale. */
+.vibelens-panel__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.vibelens-panel__title {
+  font-weight: 600;
+}
+
+.vibelens-panel__refresh {
+  background: #3a3a3a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #d4d4d4;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.vibelens-panel__refresh:hover {
+  background: #4a4a4a;
+}
+
+.vibelens-panel__summary {
+  margin: 0 0 8px;
+  color: #bbb;
+}
+
+.vibelens-panel__degraded {
+  color: #d68a4a;
+}
+
+.vibelens-file {
+  padding: 6px 0;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.vibelens-file__path {
+  display: block;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #4f9dff;
+}
+
+.vibelens-file__rationale {
+  display: block;
+  margin-top: 2px;
+  color: #ccc;
+}
