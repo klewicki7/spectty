@@ -19,10 +19,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use spectty_core::entities::diff::DiffExplanation;
 use spectty_core::ports::{PersistenceError, PersistencePort};
-use spectty_core::{ApprovalState, SpecContract};
+use spectty_core::{AgentStatus, ApprovalState, QuickAction, SpecContract};
 use tauri::State;
 
 use crate::diff_pipeline::DiffPipelines;
+use crate::session_runtime::StatusChanged;
 use crate::spec_bus::Change;
 
 /// Managed Tauri state: the shared persistence port the spec pipeline reads through. In
@@ -181,6 +182,59 @@ pub fn get_approval_impl(
         return Ok(None);
     };
     Ok(serde_json::from_str::<ApprovalRequest>(&content).ok())
+}
+
+/// Extract the `{session_id}` segment from a canonical `spectty/{session_id}/approval`
+/// key. Returns `None` for a non-canonical key (the change is then ignored).
+#[must_use]
+pub fn session_id_from_approval_key(topic_key: &str) -> Option<String> {
+    let mut parts = topic_key.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("spectty"), Some(sid), Some("approval"), None) if !sid.is_empty() => {
+            Some(sid.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Turn one option string into a [`QuickAction`] the M2 status path surfaces (WU-10.11).
+/// The option text is both the action id and its label; `bytes` is empty because the
+/// SpecPane plan-approval gate resolves through [`approve_prompt`], not by replaying
+/// bytes into the PTY (the quick action is purely a surfacing affordance).
+fn quick_action_from_option(option: &str) -> QuickAction {
+    QuickAction {
+        id: option.to_string(),
+        label: option.to_string(),
+        bytes: Vec::new(),
+    }
+}
+
+/// WU-10.11 (D29/D31): turn a SpecBus [`Change`] on a `spectty/{sid}/approval` key into a
+/// `status_changed(AwaitingInput)` event whose `quick_actions` are derived from the
+/// request's `options[]`. Reuses the EXISTING M2 status path — there is NO new approval
+/// event. Returns `None` when:
+/// - the key is non-canonical (not `spectty/{sid}/approval`),
+/// - the payload does not deserialize into an [`ApprovalRequest`] (corrupt → dropped), or
+/// - the request is already resolved (no pending decision → nothing to surface).
+///
+/// Pending requests map to [`AgentStatus::AwaitingInput`]; the resolver half (the agent's
+/// blocked `spectty_approval` long-poll + [`approve_prompt`]) shipped in PR-3/WU-5.
+#[must_use]
+pub fn approval_status_from_change(change: &Change) -> Option<StatusChanged> {
+    let session_id = session_id_from_approval_key(&change.topic_key)?;
+    let request: ApprovalRequest = serde_json::from_str(&change.content).ok()?;
+    if !request.is_pending() {
+        return None;
+    }
+    Some(StatusChanged {
+        session_id: spectty_core::SessionId(session_id),
+        status: AgentStatus::AwaitingInput,
+        quick_actions: request
+            .options
+            .iter()
+            .map(|opt| quick_action_from_option(opt))
+            .collect(),
+    })
 }
 
 /// Resolve the pending approval for `(session_id, action_id)` with `decision` (the
@@ -400,6 +454,89 @@ mod tests {
 
         // A session with no persisted spec hydrates to nothing (degrade to empty).
         assert!(hydrate_spec(port.as_ref(), "no-such").is_none());
+    }
+
+    // ── M4 WU-10.11: approval-poll → status_changed(AwaitingInput) surfacing (D29/D31) ─
+
+    fn approval_change(topic_key: &str, request: &ApprovalRequest) -> Change {
+        Change {
+            topic_key: topic_key.to_string(),
+            content: serde_json::to_string(request).unwrap(),
+            updated_at: "1".to_string(),
+        }
+    }
+
+    // WU-10.11: a PENDING approval change maps to status_changed(AwaitingInput) with
+    // quick_actions derived from the request's options[] — reusing the M2 status path.
+    #[test]
+    fn pending_approval_change_maps_to_awaiting_input_with_quick_actions() {
+        let req = ApprovalRequest {
+            action_id: "edit-1".to_string(),
+            description: "delete the prod database".to_string(),
+            risk_level: Some("high".to_string()),
+            options: vec!["approve".to_string(), "reject".to_string()],
+            resolution: None,
+        };
+        let change = approval_change("spectty/42/approval", &req);
+
+        let event = approval_status_from_change(&change)
+            .expect("a pending approval must surface AwaitingInput");
+
+        assert_eq!(event.session_id, spectty_core::SessionId("42".to_string()));
+        assert_eq!(event.status, AgentStatus::AwaitingInput);
+        // Each option becomes a surfacing quick action (id == label == option text).
+        let labels: Vec<&str> = event
+            .quick_actions
+            .iter()
+            .map(|q| q.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["approve", "reject"]);
+    }
+
+    // WU-10.11: an already-RESOLVED approval change surfaces NOTHING (the agent is no
+    // longer blocked — no AwaitingInput to show).
+    #[test]
+    fn resolved_approval_change_surfaces_nothing() {
+        let mut req = ApprovalRequest {
+            action_id: "edit-1".to_string(),
+            description: "x".to_string(),
+            risk_level: None,
+            options: vec!["approve".to_string()],
+            resolution: None,
+        };
+        req.resolution = Some(ApprovalState::Approved);
+        let change = approval_change("spectty/42/approval", &req);
+
+        assert!(approval_status_from_change(&change).is_none());
+    }
+
+    // WU-10.11: a non-canonical key or a corrupt payload is dropped (never crashes the
+    // poll loop), and the canonical-key extractor accepts only the exact 3-segment shape.
+    #[test]
+    fn approval_change_drops_non_canonical_or_corrupt() {
+        let req = ApprovalRequest {
+            action_id: "a".to_string(),
+            description: "x".to_string(),
+            risk_level: None,
+            options: vec![],
+            resolution: None,
+        };
+        // Wrong suffix → not an approval key.
+        assert!(approval_status_from_change(&approval_change("spectty/42/spec", &req)).is_none());
+        // Corrupt payload under a canonical key → dropped.
+        assert!(approval_status_from_change(&Change {
+            topic_key: "spectty/42/approval".to_string(),
+            content: "{not json".to_string(),
+            updated_at: "1".to_string(),
+        })
+        .is_none());
+
+        assert_eq!(
+            session_id_from_approval_key("spectty/42/approval"),
+            Some("42".to_string())
+        );
+        assert_eq!(session_id_from_approval_key("spectty//approval"), None);
+        assert_eq!(session_id_from_approval_key("spectty/42/approval/x"), None);
     }
 
     // ── M4 WU-5: the plan-approval resolver (D31/D33) ─────────────────────────────────

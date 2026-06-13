@@ -134,6 +134,7 @@ pub async fn pty_spawn(
         // A raw PTY has no spec pipeline.
         spec_poll_shutdown: None,
         diff_poll_shutdown: None,
+        approval_poll_shutdown: None,
         diff_watch_guard: None,
     };
 
@@ -393,6 +394,7 @@ mod tests {
                 state_file_path: String::new(),
                 spec_poll_shutdown: None,
                 diff_poll_shutdown: None,
+                approval_poll_shutdown: None,
                 diff_watch_guard: None,
             },
         );
