@@ -1,6 +1,12 @@
 # M4 — The Triad (Living Spec Pane + VibeLens + Why) — Task Checklist
 
-> **STATUS: NOT STARTED.** sdd-tasks output; consumes `sdd/M4-triad-spec-vibelens/spec`
+> **STATUS: APPLY COMPLETE (PR-1..PR-6) — pending manual acceptance (WU-11).** All code work
+> units WU-0..WU-10 + WU-11 docs are done; the only open item is the USER's manual acceptance
+> run of the 8 macOS exit criteria (`acceptance.md`, criteria 11.1–11.8 still ☐ PENDING). PR-6
+> (Slice 5: WU-10 UI triad + WU-10.11 approval surfacing + WU-11 acceptance/ADR docs) on branch
+> `feat/m4-pr6-ui-triad`. Next phase = sdd-verify.
+>
+> sdd-tasks output; consumes `sdd/M4-triad-spec-vibelens/spec`
 > (obs #870) + `openspec/changes/M4-triad-spec-vibelens/specs/*` (change-level `spec.md`
 > + 13 per-capability deltas, 25 REQs M4-REQ-01..25) and `sdd/M4-triad-spec-vibelens/design`
 > (obs #869) + `openspec/changes/M4-triad-spec-vibelens/design.md` (ADRs D26–D38).
@@ -617,36 +623,39 @@ stay within the 400-line review budget, so the UI triad lands as PR-6 (WU-10 + W
 > TriadLayout = Spec | Terminal | VibeLens, all visible per session. Slice 5 also adds minimal
 > `spectty_status`/`spectty_cost` effect stubs (per design slice map).
 
-- [ ] 10.1 RED: `ipc listeners — listenSpecUpdated/listenDiffUpdated/approvePrompt` (vitest,
+- [x] 10.1 RED: `ipc listeners — listenSpecUpdated/listenDiffUpdated/approvePrompt` (vitest,
   mocked `@tauri-apps/api`) — each registers/invokes the correct event/command name + payload
   shape. `[M4-REQ-16][M4-REQ-17][M4-REQ-19]` `[unit]`
-- [ ] 10.2 RED: `SpecPane renders live checklist from spec_updated without refresh` — emits a
+- [x] 10.2 RED: `SpecPane renders live checklist from spec_updated without refresh` — emits a
   `spec_updated` → checklist updates, each task shows its `TaskState`. `[M4-REQ-18]` `[unit]`
-- [ ] 10.3 RED: `SpecPane shows generic-tier coarse scraped badge` — generic-tier session → coarse
+- [x] 10.3 RED: `SpecPane shows generic-tier coarse scraped badge` — generic-tier session → coarse
   badge rendered (not per-task detail). `[M4-REQ-18]` `[unit]`
-- [ ] 10.4 RED: `SpecPane approval gate calls approve_prompt and hides once resolved` —
+- [x] 10.4 RED: `SpecPane approval gate calls approve_prompt and hides once resolved` —
   Approve/Edit/Reject → `approvePrompt(session_id, action_id, decision)`; gate hides on resolution.
   `[M4-REQ-19]` `[unit]`
-- [ ] 10.5 RED: `VibeLensPanel renders per-file rationale from diff_updated` — emits `diff_updated`
+- [x] 10.5 RED: `VibeLensPanel renders per-file rationale from diff_updated` — emits `diff_updated`
   → per-file rationale; empty → "no changes"; degraded → "unavailable"/"parse error" (no blank/
   crash). `[M4-REQ-20]` `[unit]`
-- [ ] 10.6 RED: `VibeLensPanel manual refresh forces fresh explanation` — refresh control triggers
+- [x] 10.6 RED: `VibeLensPanel manual refresh forces fresh explanation` — refresh control triggers
   a fresh explanation independent of the auto trigger. `[M4-REQ-21]` `[unit]`
-- [ ] 10.7 RED: `TriadLayout shows spec + terminal + vibelens per session` — all three visible.
+- [x] 10.7 RED: `TriadLayout shows spec + terminal + vibelens per session` — all three visible.
   `[M4-REQ-22]` `[unit]`
-- [ ] 10.8 GREEN: extend `ui/src/session/ipc.ts` — add the 5 listeners/commands. `[M4-REQ-16][M4-REQ-17]`
+- [x] 10.8 GREEN: extend `ui/src/session/ipc.ts` — add the 5 listeners/commands. `[M4-REQ-16][M4-REQ-17]`
   `[unit][D29]`
-- [ ] 10.9 GREEN: create `ui/src/components/SpecPane.tsx` (checklist + approval gate),
+- [x] 10.9 GREEN: create `ui/src/components/SpecPane.tsx` (checklist + approval gate),
   `ui/src/components/VibeLensPanel.tsx` (rationale + refresh + degraded states), and
   `ui/src/components/TriadLayout.tsx` (Spec | Terminal | VibeLens). React 19 named imports.
   `[M4-REQ-18][M4-REQ-19][M4-REQ-20][M4-REQ-21][M4-REQ-22]` `[unit]`
-- [ ] 10.10 GREEN: add minimal `spectty_status`/`spectty_cost` effect stubs in
+- [x] 10.10 GREEN: add minimal `spectty_status`/`spectty_cost` effect stubs in
   `crates/spectty-mcp/src/main.rs` (per design slice map; schema UNTOUCHED). `[M4-REQ-08]` `[unit][D16]`
-- [ ] 10.11 Poll loop watches `spectty/{sid}/approval` → emits `status_changed(AwaitingInput)` +
+  > ALREADY SATISFIED — both tools are registered and fall through to `stub_ack(other)` in
+  > `handle_tools_call`; the byte-frozen `tools/list` schema is UNTOUCHED. Pinned by the existing
+  > test `non_spec_tools_keep_stub_ack` (PR-2). No new code needed this slice.
+- [x] 10.11 Poll loop watches `spectty/{sid}/approval` → emits `status_changed(AwaitingInput)` +
   `quick_actions` from `options[]` (REQ-10 surfacing half; the resolver half shipped in PR-3/WU-5).
   Reuses the EXISTING M2 status path — NO new approval event (D29). Consumes the pending-doc shape
   PR-3 pinned at `spectty/{session_id}/approval`. `[M4-REQ-10]` `[unit][D29][D31]`
-- [ ] **Gate (WU-10)**: `pnpm -C ui test` green (all vitest specs) + `pnpm -C ui build` succeeds;
+- [x] **Gate (WU-10)**: `pnpm -C ui test` green (all vitest specs) + `pnpm -C ui build` succeeds;
   `cargo test --workspace` green; fmt/clippy clean; `cargo deny ... check bans` → `bans ok`.
 
 ---
@@ -683,13 +692,21 @@ stay within the 400-line review budget, so the UI triad lands as PR-6 (WU-10 + W
   "unavailable"/"parse error", never crashes. `[M4-REQ-14][M4-REQ-15][M4-REQ-18][M4-REQ-25]` `[manual]`
 - [ ] 11.8 **Exit 8 — triad layout**: Spec pane + Terminal + VibeLens all visible per session on
   macOS. `[M4-REQ-22][M4-REQ-25]` `[manual]`
-- [ ] 11.9 DOC: append D26-D38 ADR notes to `docs/decisions/0004-agent-agnostic-core.md`
+- [x] 11.9 DOC: append D26-D38 ADR notes to `docs/decisions/0004-agent-agnostic-core.md`
   (§Amendment M4) — one note per decision, referencing the implementing files; record the
   Tasks-phase resolution (async-trait absent → sync ports) and G1/G2 verified shapes. `[manual]`
-- [ ] 11.10 Record results in `openspec/changes/M4-triad-spec-vibelens/acceptance.md` for
+  > DONE — §"Amendment — M4 The Triad (D26–D38)" appended: per-ADR notes (D26–D38) with
+  > implementing files, the async-trait-absent → SYNC-ports resolution, and the verified
+  > G1/G2 shapes (G2: `show_diff_explanation` is a WRITE; adapter = display SINK).
+- [~] 11.10 Record results in `openspec/changes/M4-triad-spec-vibelens/acceptance.md` for
   `sdd-verify`. macOS criteria (11.1–11.8) gating; Windows best-effort, MUST NOT block. `[manual]`
+  > CHECKLIST WRITTEN (apply phase, PR-6) — `acceptance.md` created with the 8 criteria mapped
+  > verbatim, per-criterion steps + automated floor. The RESULTS recording (marking each PASS) is
+  > the USER's manual run on macOS — all criterion result lines stay ☐ PENDING until then.
 - [ ] **Gate (WU-11)**: all 8 macOS exit criteria PASS → M4 acceptance PASS; results recorded in
   acceptance.md. Windows informational only.
+  > BLOCKED ON MANUAL RUN — the automated floor is green on the PR-6 branch; the 8 macOS criteria
+  > require the user to run the packaged app against real Claude Code + engram + VibeLens.
 
 ---
 
