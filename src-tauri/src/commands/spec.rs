@@ -54,6 +54,23 @@ pub fn get_diff_explanation(
     Ok(pipelines.current_explanation(&session_id))
 }
 
+/// `get_approval(session_id)` → the current pending-or-resolved [`ApprovalRequest`] for the
+/// session, or `None` when none is stored / the stored blob is corrupt. A backend transport
+/// failure surfaces as `Err(String)`. Thin shell over [`get_approval_impl`].
+///
+/// The SpecPane plan-approval gate calls this to resolve through the REAL pending
+/// `(session_id, action_id)` rather than a hardcoded id: there is NO fixed `action_id`
+/// contract between the UI and the agent (the agent supplies a free-form id, D31). When a
+/// pending request exists the gate enables its decision buttons; when the spec says
+/// `approval == Pending` but NO pending request is stored the gate stays disabled.
+#[tauri::command]
+pub fn get_approval(
+    session_id: String,
+    persistence: State<'_, SpecPersistence>,
+) -> Result<Option<ApprovalRequest>, String> {
+    get_approval_impl(persistence.0.as_ref(), &session_id).map_err(|e| e.to_string())
+}
+
 /// The `spec_updated` event payload (D29): the session whose spec changed plus the new
 /// [`SpecContract`]. Emitted via the Tauri v2 `Emitter` on an ACTUAL change only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

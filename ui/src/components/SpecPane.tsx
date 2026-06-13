@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   approvePrompt,
+  getApproval,
   getSpec,
   listenSpecUpdated,
+  listenStatusChanged,
   type AgentTier,
   type ApprovalDecision,
+  type ApprovalRequest,
   type SessionId,
   type SpecContract,
   type TaskState,
@@ -21,13 +24,6 @@ export interface SpecPaneProps {
    */
   tier: AgentTier;
 }
-
-/**
- * The action id the plan-approval gate addresses. The cooperative agent's
- * `spectty_approval` for the PLAN uses this stable id (the per-edit prompts use
- * their own ids); the SpecPane gate resolves exactly the plan approval.
- */
-const PLAN_ACTION_ID = "plan";
 
 /**
  * Runtime guard for an on-mount hydrate payload. `getSpec` resolves to a
@@ -62,6 +58,16 @@ const TASK_STATE_LABELS: Record<TaskState, string> = {
  * `Pending`. The gate disappears once approval resolves. On mount it hydrates once via
  * `getSpec` so a restored session shows its prior plan immediately (exit criterion 6).
  *
+ * The gate resolves through the REAL pending `(session_id, action_id)` fetched via
+ * `getApproval` — there is NO hardcoded `action_id` contract with the agent (the agent
+ * supplies a free-form id, D31). While the contract says `approval === "Pending"` but no
+ * pending `ApprovalRequest` is stored yet, the gate renders its buttons DISABLED with a
+ * "waiting for the agent's approval request" hint (an honest distinct state, never a
+ * click that silently no-ops). The pending request is re-fetched on mount, whenever the
+ * spec transitions into `Pending`, and on `status_changed(AwaitingInput)` (the same event
+ * the backend approval poll loop already drives — the cheapest correct trigger to flip the
+ * gate enabled, no new event needed).
+ *
  * For a generic session there is no structured spec, so the pane shows a coarse
  * "PTY-scraped progress" badge instead of a precise checklist (graceful degradation).
  *
@@ -71,6 +77,9 @@ const TASK_STATE_LABELS: Record<TaskState, string> = {
  */
 export function SpecPane({ sessionId, tier }: SpecPaneProps) {
   const [spec, setSpec] = useState<SpecContract | null>(null);
+  // The CURRENT pending approval request, or null when none is stored. Its `action_id`
+  // is what the gate resolves through — never a hardcoded constant.
+  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const isGeneric = tier === "Generic";
 
   // Mirror the live session id in a ref so the listener (registered once) always
@@ -82,31 +91,67 @@ export function SpecPane({ sessionId, tier }: SpecPaneProps) {
     if (isGeneric) {
       return;
     }
-    let unlisten: (() => void) | null = null;
     let cancelled = false;
+    const unlisteners: Array<() => void> = [];
 
-    // On-mount hydrate: restore the prior plan immediately (no 2s blank window).
+    // Fetch the current pending request for this session; ignore a stale resolution.
+    const refetchApproval = () => {
+      void getApproval(sessionIdRef.current).then((req) => {
+        if (!cancelled) {
+          setApproval(req);
+        }
+      });
+    };
+
+    // On-mount hydrate: restore the prior plan + any pending approval immediately.
     void getSpec(sessionId).then((stored) => {
       if (!cancelled && isSpecContract(stored)) {
         setSpec((prev) => prev ?? stored);
       }
     });
+    refetchApproval();
 
     void listenSpecUpdated((payload) => {
       if (payload.session_id === sessionIdRef.current) {
         setSpec(payload.spec);
+        // A spec that just entered the approval gate is the cheapest signal to look
+        // for the agent's pending request without adding a new event.
+        if (payload.spec.approval === "Pending") {
+          refetchApproval();
+        }
       }
     }).then((fn) => {
       if (cancelled) {
         fn();
       } else {
-        unlisten = fn;
+        unlisteners.push(fn);
+      }
+    });
+
+    // The backend approval poll loop surfaces a pending request as
+    // status_changed(AwaitingInput). Re-fetching on that event is the cheapest correct
+    // way to flip the gate from disabled (waiting) to enabled once the agent's request
+    // actually lands — no new event needed.
+    void listenStatusChanged((payload) => {
+      if (
+        payload.session_id === sessionIdRef.current &&
+        payload.status === "AwaitingInput"
+      ) {
+        refetchApproval();
+      }
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisteners.push(fn);
       }
     });
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      for (const fn of unlisteners) {
+        fn();
+      }
     };
   }, [sessionId, isGeneric]);
 
@@ -120,11 +165,25 @@ export function SpecPane({ sessionId, tier }: SpecPaneProps) {
     );
   }
 
+  // The pending request whose action_id the gate resolves through. Null (or already
+  // resolved) means the gate has nothing live to resolve → disabled.
+  const pendingRequest =
+    approval !== null && (approval.resolution ?? null) === null ? approval : null;
+
   const decide = (decision: ApprovalDecision) => {
-    void approvePrompt(sessionIdRef.current, PLAN_ACTION_ID, decision);
+    // NEVER resolve without a real pending request: no action_id, nothing to resolve.
+    if (pendingRequest === null) {
+      return;
+    }
+    void approvePrompt(
+      sessionIdRef.current,
+      pendingRequest.action_id,
+      decision,
+    );
   };
 
-  const gatePending = spec !== null && spec.approval === "Pending";
+  const gateVisible = spec !== null && spec.approval === "Pending";
+  const gateReady = pendingRequest !== null;
 
   return (
     <section className="spec-pane" aria-label="Spec">
@@ -150,16 +209,32 @@ export function SpecPane({ sessionId, tier }: SpecPaneProps) {
               </li>
             ))}
           </ul>
-          {gatePending ? (
+          {gateVisible ? (
             <div className="spec-pane__gate" role="group" aria-label="Plan approval">
-              <p className="spec-pane__gate-prompt">Approve the plan to begin edits.</p>
-              <button type="button" onClick={() => decide("approve")}>
+              <p className="spec-pane__gate-prompt">
+                {gateReady
+                  ? "Approve the plan to begin edits."
+                  : "Waiting for the agent's approval request…"}
+              </p>
+              <button
+                type="button"
+                disabled={!gateReady}
+                onClick={() => decide("approve")}
+              >
                 Approve
               </button>
-              <button type="button" onClick={() => decide("adjust")}>
+              <button
+                type="button"
+                disabled={!gateReady}
+                onClick={() => decide("adjust")}
+              >
                 Adjust
               </button>
-              <button type="button" onClick={() => decide("reject")}>
+              <button
+                type="button"
+                disabled={!gateReady}
+                onClick={() => decide("reject")}
+              >
                 Reject
               </button>
             </div>

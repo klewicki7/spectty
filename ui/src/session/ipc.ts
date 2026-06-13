@@ -13,6 +13,7 @@ const GET_SESSION = "get_session";
 // / `get_diff_explanation` read the current contract / explanation on demand
 // (mount + manual refresh); `approve_prompt` resolves the plan-approval gate.
 const GET_SPEC = "get_spec";
+const GET_APPROVAL = "get_approval";
 const GET_DIFF_EXPLANATION = "get_diff_explanation";
 const APPROVE_PROMPT = "approve_prompt";
 
@@ -155,6 +156,26 @@ export interface SpecContract {
   dev_override: boolean;
 }
 
+/**
+ * One pending-or-resolved approval request. Mirrors the Rust serde shape EXACTLY
+ * (`src-tauri/src/commands/spec.rs` → `ApprovalRequest`): `action_id`, `description`
+ * (defaults to `""`), an optional `risk_level` (omitted on the wire when `None`),
+ * `options[]`, and `resolution` (`null` while still pending, an `ApprovalState` once
+ * resolved). `resolution === null` ⇔ the request is still pending and the agent's
+ * `spectty_approval` long-poll is blocked.
+ *
+ * The SpecPane gate resolves through the `action_id` carried HERE — there is NO
+ * hardcoded id contract between the UI and the agent (the agent supplies a free-form
+ * id, D31). Keep these field names in lockstep with the Rust struct.
+ */
+export interface ApprovalRequest {
+  action_id: string;
+  description: string;
+  risk_level?: string | null;
+  options: string[];
+  resolution?: ApprovalState | null;
+}
+
 /** The rationale for one changed file (`FileExplanation`, D34). */
 export interface FileExplanation {
   path: string;
@@ -262,6 +283,19 @@ export async function listenSessionClosed(
  */
 export async function getSpec(id: SessionId): Promise<SpecContract | null> {
   return invoke<SpecContract | null>(GET_SPEC, { sessionId: id });
+}
+
+/**
+ * Read the current pending-or-resolved `ApprovalRequest` for a session (`null` when none
+ * is stored or the stored blob is corrupt). The SpecPane gate calls this to resolve through
+ * the REAL pending `action_id` rather than a hardcoded constant: when a pending request
+ * exists the gate enables its buttons; while `spec.approval === "Pending"` but no pending
+ * request is stored the gate stays disabled (waiting for the agent's request).
+ */
+export async function getApproval(
+  id: SessionId,
+): Promise<ApprovalRequest | null> {
+  return invoke<ApprovalRequest | null>(GET_APPROVAL, { sessionId: id });
 }
 
 /**
