@@ -658,6 +658,28 @@ stay within the 400-line review budget, so the UI triad lands as PR-6 (WU-10 + W
 - [x] **Gate (WU-10)**: `pnpm -C ui test` green (all vitest specs) + `pnpm -C ui build` succeeds;
   `cargo test --workspace` green; fmt/clippy clean; `cargo deny ... check bans` → `bans ok`.
 
+### PR-6 adversarial-review fixes (post-apply)
+
+- [x] **F1 (MAJOR)**: removed the hardcoded UI `PLAN_ACTION_ID = "plan"`. The SpecPane gate now
+  fetches the REAL pending `ApprovalRequest` via a new `get_approval` `#[tauri::command]` (over the
+  existing `get_approval_impl`, registered in `lib.rs`) and resolves through `request.action_id` —
+  there is NO fixed `action_id` contract with the agent (D31). While `spec.approval == "Pending"`
+  but no pending request is stored, the gate renders DISABLED with a "waiting for the agent's
+  approval request" hint instead of a click that silently no-ops; it flips enabled on
+  `status_changed(AwaitingInput)` (reuses the existing approval poll loop — no new event). Added a
+  cross-seam vitest that feeds the EXACT Rust-serialized pending `ApprovalRequest` JSON literal
+  through `getApproval` and asserts the gate resolves with that id (`plan-1`), plus a disabled-gate
+  test. `[M4-REQ-19][D31]`
+- [x] **F2 (MINOR, RATIFIED description-only schema change)**: replaced the stale
+  "M2 stub: no effect; effects land in M3" descriptions for `spectty_diff` (now: triggers the
+  VibeLens diff pipeline, returns immediately), `spectty_approval` (now: registers a pending
+  approval and BLOCKS until resolved or timeout), and `spectty_status` (now: honest "still a stub")
+  in BOTH the live `tool_schemas()` and the `FROZEN_TOOLS_SCHEMA` fixture in lockstep (the fixture
+  comment authorizes exactly this). Param shapes UNCHANGED; `tools/list` byte-frozen test stays
+  green. `[M4-REQ-08][D16]`
+- [x] **F3 (NIT)**: wrapped the synchronous `spec_updated` dispatches in `act()` in
+  `SpecPane.test.tsx` so no React act() warnings remain.
+
 ---
 
 ## WU-11 — Manual acceptance (M4 exit gate) + ADR D26-D38 note  [manual]
