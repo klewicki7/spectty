@@ -9,12 +9,26 @@ const CLOSE_SESSION = "close_session";
 const LIST_SESSIONS = "list_sessions";
 const GET_SESSION = "get_session";
 
+// M4 triad commands (registered in `src-tauri/src/commands/spec.rs`). `get_spec`
+// / `get_diff_explanation` read the current contract / explanation on demand
+// (mount + manual refresh); `approve_prompt` resolves the plan-approval gate.
+const GET_SPEC = "get_spec";
+const GET_APPROVAL = "get_approval";
+const GET_DIFF_EXPLANATION = "get_diff_explanation";
+const APPROVE_PROMPT = "approve_prompt";
+
 // The Tauri events the session runtime emits (snake_case payloads on the wire —
 // `StatusChanged`/`SessionSummary` carry NO serde rename, so field names stay
 // snake_case across the IPC boundary).
 const STATUS_CHANGED_EVENT = "status_changed";
 const SESSION_CREATED_EVENT = "session_created";
 const SESSION_CLOSED_EVENT = "session_closed";
+
+// M4 triad events (emitted from the SpecBus / diff pipeline poll loops, D29).
+// `spec_updated` carries the full `SpecContract`; `diff_updated` the per-file
+// `DiffExplanation`. Both payloads are snake_case on the wire (no serde rename).
+const SPEC_UPDATED_EVENT = "spec_updated";
+const DIFF_UPDATED_EVENT = "diff_updated";
 
 /**
  * Session identity. `SessionId` is a single-field tuple struct on the Rust side
@@ -70,6 +84,120 @@ export interface StatusChangedPayload {
   session_id: SessionId;
   status: AgentStatus;
   quick_actions: unknown[];
+}
+
+// ── M4 triad: SpecContract / DiffExplanation wire types ────────────────────────
+//
+// Mirror the Rust serde shapes (`crates/core/src/entities/{spec,diff}.rs`). The
+// UI NEVER computes spec/diff state locally — it renders whatever the backend
+// `spec_updated` / `diff_updated` events (or the `get_*` reads) deliver.
+
+/**
+ * A task's lifecycle state. Crosses the wire under the field name `status` (the
+ * Rust `SpecTask::state` is `#[serde(rename = "status")]`, snake_case variants).
+ */
+const TASK_STATE = {
+  PENDING: "pending",
+  IN_PROGRESS: "in_progress",
+  DONE: "done",
+  SKIPPED: "skipped",
+} as const;
+
+export type TaskState = (typeof TASK_STATE)[keyof typeof TASK_STATE];
+
+/**
+ * The plan-approval lifecycle (`ApprovalState`). PascalCase on the wire — the Rust
+ * enum has no `rename_all`, so each variant serializes as its identifier.
+ */
+const APPROVAL_STATE = {
+  PENDING: "Pending",
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
+  ADJUSTED: "Adjusted",
+} as const;
+
+export type ApprovalState = (typeof APPROVAL_STATE)[keyof typeof APPROVAL_STATE];
+
+/**
+ * The user's decision on the plan-approval gate. snake_case on the wire — the Rust
+ * `ApprovalDecision` enum is `#[serde(rename_all = "snake_case")]`.
+ */
+const APPROVAL_DECISION = {
+  APPROVE: "approve",
+  REJECT: "reject",
+  ADJUST: "adjust",
+} as const;
+
+export type ApprovalDecision =
+  (typeof APPROVAL_DECISION)[keyof typeof APPROVAL_DECISION];
+
+/** One planned task in a `SpecContract`. The lifecycle field is `status` (D32). */
+export interface SpecTask {
+  id: string;
+  title: string;
+  status: TaskState;
+  notes?: string | null;
+}
+
+/** One incremental progress entry. */
+export interface TaskProgress {
+  task_id: string;
+  status: TaskState;
+}
+
+/** The living plan-and-progress aggregate (`SpecContract`, D32). */
+export interface SpecContract {
+  intent: string;
+  proposal?: string | null;
+  tasks: SpecTask[];
+  progress: TaskProgress[];
+  approval: ApprovalState;
+  steering_notes: string[];
+  dev_override: boolean;
+}
+
+/**
+ * One pending-or-resolved approval request. Mirrors the Rust serde shape EXACTLY
+ * (`src-tauri/src/commands/spec.rs` → `ApprovalRequest`): `action_id`, `description`
+ * (defaults to `""`), an optional `risk_level` (omitted on the wire when `None`),
+ * `options[]`, and `resolution` (`null` while still pending, an `ApprovalState` once
+ * resolved). `resolution === null` ⇔ the request is still pending and the agent's
+ * `spectty_approval` long-poll is blocked.
+ *
+ * The SpecPane gate resolves through the `action_id` carried HERE — there is NO
+ * hardcoded id contract between the UI and the agent (the agent supplies a free-form
+ * id, D31). Keep these field names in lockstep with the Rust struct.
+ */
+export interface ApprovalRequest {
+  action_id: string;
+  description: string;
+  risk_level?: string | null;
+  options: string[];
+  resolution?: ApprovalState | null;
+}
+
+/** The rationale for one changed file (`FileExplanation`, D34). */
+export interface FileExplanation {
+  path: string;
+  rationale: string;
+}
+
+/** The explanation of a whole working-tree diff (`DiffExplanation`, D34). */
+export interface DiffExplanation {
+  files: FileExplanation[];
+  summary: string;
+}
+
+/** Payload of the `spec_updated` event (`SpecUpdated`; snake_case fields, D29). */
+export interface SpecUpdatedPayload {
+  session_id: SessionId;
+  spec: SpecContract;
+}
+
+/** Payload of the `diff_updated` event (`DiffUpdated`; snake_case fields, D29). */
+export interface DiffUpdatedPayload {
+  session_id: SessionId;
+  explanation: DiffExplanation;
 }
 
 /**
@@ -143,5 +271,82 @@ export async function listenSessionClosed(
 ): Promise<UnlistenFn> {
   return listen<SessionId>(SESSION_CLOSED_EVENT, (event) => {
     onClosed(event.payload);
+  });
+}
+
+// ── M4 triad: spec / diff commands + listeners (D29) ───────────────────────────
+
+/**
+ * Read the current `SpecContract` for a session (`null` when none is stored or the
+ * stored blob is corrupt). Used on (re-)attach to hydrate immediately; live updates
+ * arrive via `spec_updated`.
+ */
+export async function getSpec(id: SessionId): Promise<SpecContract | null> {
+  return invoke<SpecContract | null>(GET_SPEC, { sessionId: id });
+}
+
+/**
+ * Read the current pending-or-resolved `ApprovalRequest` for a session (`null` when none
+ * is stored or the stored blob is corrupt). The SpecPane gate calls this to resolve through
+ * the REAL pending `action_id` rather than a hardcoded constant: when a pending request
+ * exists the gate enables its buttons; while `spec.approval === "Pending"` but no pending
+ * request is stored the gate stays disabled (waiting for the agent's request).
+ */
+export async function getApproval(
+  id: SessionId,
+): Promise<ApprovalRequest | null> {
+  return invoke<ApprovalRequest | null>(GET_APPROVAL, { sessionId: id });
+}
+
+/**
+ * Read the current `DiffExplanation` for a session (`null` when the pipeline has not
+ * produced one yet). Used on mount and as the manual-refresh fallback; live updates
+ * arrive via `diff_updated`.
+ */
+export async function getDiffExplanation(
+  id: SessionId,
+): Promise<DiffExplanation | null> {
+  return invoke<DiffExplanation | null>(GET_DIFF_EXPLANATION, { sessionId: id });
+}
+
+/**
+ * Resolve the plan-approval gate for `(session_id, action_id)` with the user's
+ * `decision`, unblocking the agent's `spectty_approval` long-poll. Resolves to
+ * `true` when a pending request was resolved, `false` for an unknown key (no-op).
+ */
+export async function approvePrompt(
+  id: SessionId,
+  actionId: string,
+  decision: ApprovalDecision,
+): Promise<boolean> {
+  return invoke<boolean>(APPROVE_PROMPT, {
+    sessionId: id,
+    actionId,
+    decision,
+  });
+}
+
+/**
+ * Subscribe to `spec_updated`. The backend emits it only on an ACTUAL spec change
+ * (D29 — change-detected poll loop); the handler receives the raw snake_case payload.
+ */
+export async function listenSpecUpdated(
+  onSpec: (payload: SpecUpdatedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SpecUpdatedPayload>(SPEC_UPDATED_EVENT, (event) => {
+    onSpec(event.payload);
+  });
+}
+
+/**
+ * Subscribe to `diff_updated`. The backend emits it only when the working-tree diff
+ * actually changed (D37 — hash-deduped pipeline); the handler receives the raw
+ * snake_case payload.
+ */
+export async function listenDiffUpdated(
+  onDiff: (payload: DiffUpdatedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<DiffUpdatedPayload>(DIFF_UPDATED_EVENT, (event) => {
+    onDiff(event.payload);
   });
 }

@@ -8,6 +8,10 @@ seam (Decision 1, carve-out B): a `tools/call` registers a pending request keyed
 action_id)`, surfaces it as `AwaitingInput` + `quick_actions` (reusing the M2 status path), and
 resolves when the UI sends `approve_prompt`. Exact plumbing pinned in design.
 
+The UI resolves whatever pending `(session_id, action_id)` actually exists for the session (read via
+`get_approval`) — the `action_id` is the agent's free-form id, NOT a fixed constant. There is no
+hardcoded `action_id` contract between the UI and the agent.
+
 ## ADDED Requirements
 
 ### Requirement: spectty_approval registers a pending request and surfaces it as AwaitingInput

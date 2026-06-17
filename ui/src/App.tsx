@@ -2,6 +2,7 @@ import { useRef } from "react";
 
 import { Terminal } from "./components/Terminal";
 import { SessionTerminal } from "./components/SessionTerminal";
+import { TriadLayout } from "./components/TriadLayout";
 import { PaneHeader } from "./components/PaneHeader";
 import { SpawnDialog } from "./components/SpawnDialog";
 import { useSession } from "./hooks/useSession";
@@ -26,7 +27,7 @@ import { createBufferedOutputChannel } from "./hooks/useSessionTerminal";
  * session bleed.
  */
 export function App() {
-  const { session, status, error, spawn, close } = useSession();
+  const { session, status, tier, error, spawn, close } = useSession();
 
   // A stable ref holds the current session's buffered output channel. A new
   // channel is created each time the user spawns so old messages from a
@@ -63,10 +64,12 @@ export function App() {
           <Terminal />
         </>
       ) : (
-        <SessionTerminal
-          sessionId={session.id}
-          outputChannel={outputChannelRef.current}
-        />
+        <TriadLayout sessionId={session.id} tier={tier ?? "Cooperative"}>
+          <SessionTerminal
+            sessionId={session.id}
+            outputChannel={outputChannelRef.current}
+          />
+        </TriadLayout>
       )}
     </main>
   );

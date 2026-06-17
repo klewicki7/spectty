@@ -294,6 +294,7 @@ pub fn run() {
             commands::session::list_sessions,
             commands::session::get_session,
             commands::spec::get_spec,
+            commands::spec::get_approval,
             commands::spec::get_diff_explanation,
             commands::spec::approve_prompt,
         ])

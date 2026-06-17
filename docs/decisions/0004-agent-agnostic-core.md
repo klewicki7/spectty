@@ -310,3 +310,121 @@ Rationale:
 **The code is the source of truth** — `crates/core/src/ports/agent_runner.rs` and
 `crates/core/src/ports/provisioning.rs`. The `provisioner()` shape shown in
 `agent-abstraction.md` is historical; that doc carries the same amendment note.
+
+---
+
+## Amendment — M4 The Triad (Living Spec Pane + VibeLens) (D26–D38)
+
+- Date: 2026-06-12
+- Driver: change `M4-triad-spec-vibelens` (design ADRs D26–D38)
+
+M4 gives the five FROZEN MCP tools (`spectty_spec`, `spectty_diff`, `spectty_approval`,
+`spectty_status`, `spectty_cost`) real EFFECTS behind their unchanged `tools/list` schema,
+wires `EngramAdapter` to the engram local HTTP daemon (engram-as-bus, Decision 1), adds
+three pure Core entities + three Core port traits, and builds the React triad. The Core
+quarantine held at every PR: Core gained ONLY `serde + thiserror` types/traits
+(`cargo deny --manifest-path crates/core/Cargo.toml check bans` = `bans ok` throughout).
+
+The decisions below (D26–D38) continue the D-series (M2 = D7–D20, M3 = D21–D25).
+
+### Tasks-phase binding resolution — `async-trait` absent → SYNC Core ports
+
+Verified against `crates/core/Cargo.toml`: runtime deps are `serde` + `thiserror` ONLY
+(`serde_json` is a dev-dep). `async-trait` is ABSENT. The three new Core ports (`GitPort`,
+`FileWatchPort`, `DiffExplainerPort`) therefore use **SYNC** signatures; the async
+(reqwest / stdio / notify) is bridged INSIDE the adapters via the dedicated-runtime
+`block_on` pattern. Adding `async-trait` would have been a NEW Core dep and broken the
+quarantine. The design's `#[async_trait]` sketch is explicitly overridden by its own NOTE.
+
+### Pre-apply gates (verified)
+
+- **G1 (engram :7437 REST):** verified against the running daemon. `updated_at` crosses the
+  wire as a `"YYYY-MM-DD HH:MM:SS"` STRING (not an `i64`), so the change-detect feed and the
+  `since` filter are `String` (`spec_bus`/`EngramHttp`). Exact path pinned in design.md §G1.
+- **G2 (`show_diff_explanation` schema, v0.1.0):** verified 2026-06-11. The tool requires
+  `title` + `diff` (strings); per-file rationale is `annotations:[{file,explanation,...}]`
+  (NO `file_analysis` param). It is a side-effecting **WRITE** returning
+  `{ok, reviewId, syncId, deduped}` — NOT a `DiffExplanation`. Consequence: `VibeLensMcpAdapter`
+  is a display **SINK** that BUILDS the `DiffExplanation` locally and PUSHES it; it is best-effort
+  (transport/parse failure degrades, the locally-built explanation is still returned).
+
+### ADRs
+
+- **D26 — EngramHttp seam.** reqwest behind a private `pub(crate) trait EngramHttp`;
+  `EngramAdapter` (the `PersistencePort` impl) owns `Arc<dyn EngramHttp>` + a dedicated Tokio
+  runtime handle, `block_on`-bridging the sync port → async reqwest. `FakeEngramHttp` contract
+  tests now; verified shapes swap without touching the port. Files:
+  `crates/adapters/src/persistence/{engram.rs,engram_http.rs}`.
+- **D27 — poll/subscribe is adapter-side, NOT a port method.** `PersistencePort` UNCHANGED
+  (M4-REQ-01). The `SpecBus` struct holds `Arc<dyn PersistencePort>`, polls per topic_key, emits
+  via an injected `FnMut` closure (mirrors M3 `run_signal_loop`). File: `src-tauri/src/spec_bus.rs`.
+- **D28 — change detection by `updated_at` (strictly-greater), 2s default poll
+  (`SPECTTY_POLL_MS`).** The port-only fallback change-detects by equality + a synthetic
+  monotonic counter. Deserialize `String → SpecContract` adapter-side. File: `spec_bus.rs`.
+- **D29 — Tauri events / commands.** `spec_updated {session_id, spec}` + `diff_updated
+  {session_id, explanation}`; commands `get_spec`, `get_diff_explanation`, `approve_prompt`.
+  Approval REUSES the existing `status_changed (AwaitingInput, quick_actions)` path — NO new
+  approval event (the surfacing half is WU-10.11). Files: `src-tauri/src/commands/spec.rs`,
+  `commands/session.rs`, `ui/src/session/ipc.ts`.
+- **D30 — engram-as-bus ONLY in M4; state-file side-channel deferred.** The 2s poll satisfies
+  exit criterion 3. Reopen only on acceptance evidence.
+- **D31 — `spectty_approval` blocking = engram round-trip resolver.** The handler upserts the
+  request to `spectty/{sid}/approval` then bounded-long-polls the same key for a resolution;
+  `approve_prompt` writes the decision THROUGH the Core `ApprovalState` and upserts the resolved
+  payload so the blocked MCP caller unblocks. Single mechanism, restart-survivable, spectty-mcp
+  stays serde+http only. Files: `crates/spectty-mcp/src/main.rs`, `commands/spec.rs`.
+- **D32 — Core `SpecContract`.** `crates/core/src/entities/spec.rs`: `SpecContract` +
+  `SpecTask` + `enum TaskState {Pending,InProgress,Done,Skipped}` + `enum ApprovalState`.
+  **Finding 1:** the wire field for a task's lifecycle is `status` (`#[serde(rename = "status")]`);
+  `intent` is `#[serde(default)]`. **Finding 2:** `TaskState::transition` is INFALLIBLE — an
+  illegal move is IGNORED (mirrors `AgentStatus::transition`), not a `Result` error.
+- **D33 — plan-approval gate is a pure Core rule (ADR-0007).** `SpecContract::may_begin_edits()`
+  is true ONLY when `Approved` (or the dev-override flag — representable, never the default,
+  distinguishable); `apply_progress` returns `SpecError::GateNotApproved` when moving to
+  `InProgress` while not approved. Adapters READ it; never re-implement. File: `spec.rs`.
+- **D34 — Core `DiffExplanation`.** `crates/core/src/entities/diff.rs`: `{files:
+  Vec<FileExplanation{path,rationale}>, summary}` + `::empty()`. `Session` gained `last_diff`
+  + `last_diff_hash` + `update_diff` (hash = `DefaultHasher`, std only). NOTE: the PR-5 pipeline
+  keeps its dedup state on the per-session `DiffPipeline` (not `Session::update_diff`) to keep
+  Core untouched that slice; the Core fields stay available for later registry wiring.
+- **D35 — three SYNC Core ports + adapters.** `GitPort::diff_head`, `FileWatchPort`,
+  `DiffExplainerPort::explain` (all SYNC — see the Tasks-phase resolution). `GitCliAdapter`
+  (shell-git, empty-repo aware via the empty-tree object) + `NotifyFileWatcher` (notify,
+  debounced via a pure `Debouncer`). `notify` is an ADAPTERS dep only. Files:
+  `crates/core/src/ports/{git,file_watch,diff_explainer}.rs`, `crates/adapters/src/{git,file_watch}/mod.rs`.
+- **D36 — VibeLens transport = stdio (VERIFIED).** `VibeLensMcpAdapter` spawns `npx -y
+  vibelens-mcp` as a stdio child (newline-delimited JSON-RPC 2.0, same framing as spectty-mcp),
+  lazy-spawn / reuse / restart-on-crash, kill+wait on Drop, `VIBELENS_TIMEOUT_MS`. Per G2 it is a
+  display SINK (PUSHes `show_diff_explanation`). File: `crates/adapters/src/diff/vibelens.rs`.
+- **D37 — diff pipeline arbitration.** `(FileWatch debounced 500ms–1s) OR (spectty_diff signal)`
+  → `GitPort::diff_head` → hash==last ? skip : `DiffExplainerPort::explain` → emit `diff_updated`.
+  Cooperative `spectty_diff` bypasses the debounce (low latency); FileWatch is the generic
+  fallback (`emits_diff_signals == false`). Shared in-flight guard + hash-dedup make a
+  double-fire harmless. WU-8.0: `.git/`-internal churn is filtered so the watcher cannot
+  self-trigger. File: `src-tauri/src/diff_pipeline.rs` (its own module, mirroring `spec_bus.rs`).
+- **D38 — restart recovery.** On spawn / re-attach, BEFORE the poll interval, ONE
+  `get(spectty/{sid}/spec)` (+ `/progress`) emits an initial `spec_updated` so the SpecPane
+  restores immediately (exit criterion 6). Diff is NOT persisted (transient). `close_session`
+  best-effort deletes the three `spectty/{sid}/*` keys alongside the state-file cleanup.
+
+### M4 UI triad (PR-6)
+
+`ui/src/session/ipc.ts` gained the five spec/diff wrappers + the `SpecContract` /
+`DiffExplanation` wire types. `SpecPane` renders the live checklist + the plan-approval gate
++ the coarse generic-tier badge; `VibeLensPanel` renders per-file rationale + empty/degraded
+states + a manual refresh; `TriadLayout` composes Spec | Terminal | VibeLens. The approval
+surfacing half (WU-10.11) is a per-session poll over `spectty/{sid}/approval` that emits the
+existing `status_changed(AwaitingInput)` with `quick_actions` from the request `options[]`.
+
+### M4 deferred items
+
+- **VibeLens quoted-path parsing (PR-5 F3):** `vibelens.rs` `changed_files` drops a file whose
+  path contains a space inside a quoted `diff --git` header (summary unaffected). Data-only fix.
+- **engram session-row memoization (PR-1 Finding 5):** confirm `ensure_session` is memoized so
+  the 2s loop does not double session-row writes.
+- See `openspec/changes/M4-triad-spec-vibelens/acceptance.md` for the manual gate and the full
+  deferred-items list.
+
+**The code is the source of truth.** Where this amendment and the code differ, the code wins;
+the apply-phase recorded the as-built deviations (notably D34's pipeline-side dedup and D37's
+own-module pipeline) in `tasks.md` / the apply-progress observation.

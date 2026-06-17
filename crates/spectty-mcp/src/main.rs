@@ -546,8 +546,9 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "spectty_diff",
-            "description": "Request a diff explanation for the current session's worktree. \
-                            M2 stub: acknowledged with no effect; effects land in M3.",
+            "description": "Trigger the VibeLens diff pipeline for the current session's \
+                            worktree and return immediately; the explanation is delivered \
+                            asynchronously to the VibeLens pane.",
             "inputSchema": {
                 "type": "object",
                 "required": ["session_id"],
@@ -559,8 +560,9 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "spectty_approval",
-            "description": "Request user approval before a risky action. \
-                            M2 stub: acknowledged with no effect; effects land in M3.",
+            "description": "Request user approval before a risky action. Registers a pending \
+                            approval and BLOCKS until the user resolves it (approve/reject/adjust) \
+                            or the call times out.",
             "inputSchema": {
                 "type": "object",
                 "required": ["session_id", "action_id", "description"],
@@ -576,7 +578,8 @@ fn tool_schemas() -> Vec<Value> {
         json!({
             "name": "spectty_status",
             "description": "Push a transient status message to the session badge and status bar. \
-                            M2 stub: acknowledged with no effect; effects land in M3.",
+                            Currently a stub: the call is acknowledged but the message is not yet \
+                            surfaced.",
             "inputSchema": {
                 "type": "object",
                 "required": ["session_id", "message"],
@@ -1648,7 +1651,7 @@ mod tests {
         },
         {
             "name": "spectty_diff",
-            "description": "Request a diff explanation for the current session's worktree. M2 stub: acknowledged with no effect; effects land in M3.",
+            "description": "Trigger the VibeLens diff pipeline for the current session's worktree and return immediately; the explanation is delivered asynchronously to the VibeLens pane.",
             "inputSchema": {
                 "type": "object",
                 "required": ["session_id"],
@@ -1660,7 +1663,7 @@ mod tests {
         },
         {
             "name": "spectty_approval",
-            "description": "Request user approval before a risky action. M2 stub: acknowledged with no effect; effects land in M3.",
+            "description": "Request user approval before a risky action. Registers a pending approval and BLOCKS until the user resolves it (approve/reject/adjust) or the call times out.",
             "inputSchema": {
                 "type": "object",
                 "required": ["session_id", "action_id", "description"],
@@ -1675,7 +1678,7 @@ mod tests {
         },
         {
             "name": "spectty_status",
-            "description": "Push a transient status message to the session badge and status bar. M2 stub: acknowledged with no effect; effects land in M3.",
+            "description": "Push a transient status message to the session badge and status bar. Currently a stub: the call is acknowledged but the message is not yet surfaced.",
             "inputSchema": {
                 "type": "object",
                 "required": ["session_id", "message"],

@@ -34,7 +34,9 @@ use spectty_core::{
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::spec::{hydrate_spec, spec_updated_from_change, SpecPersistence};
+use crate::commands::spec::{
+    approval_status_from_change, hydrate_spec, spec_updated_from_change, SpecPersistence,
+};
 use crate::diff_pipeline::{batch_should_trigger, DiffPipeline, DiffPipelines, DiffUpdated};
 use crate::pty_state::{PtyId, PtyRegistry, PtyState};
 use crate::session_runtime::{
@@ -719,6 +721,30 @@ pub async fn spawn_session(
                 ));
             }
 
+            // M4 WU-10.11 (D29/D31): the approval-surfacing poll loop. Watches
+            // `spectty/{id}/approval`; when the agent's blocked `spectty_approval` upserts a
+            // PENDING request, this emits the EXISTING `status_changed(AwaitingInput)` (with
+            // quick_actions derived from the request options) — NO new approval event. The
+            // resolver half (the long-poll + `approve_prompt`) shipped in PR-3/WU-5. Reuses the
+            // SpecBus poll seam, same shape as the spec/diff loops.
+            let approval_key = format!("spectty/{}/approval", id.0);
+            let (approval_shutdown_tx, approval_shutdown_rx) = tokio::sync::watch::channel(false);
+            {
+                let reader = Arc::new(PortPollReader::new(spec_port.clone()));
+                let bus = SpecBus::new(reader, approval_key.clone());
+                let emit_app = app.clone();
+                tokio::spawn(run_poll_loop(
+                    bus,
+                    poll_interval(),
+                    approval_shutdown_rx,
+                    move |change| {
+                        if let Some(event) = approval_status_from_change(&change) {
+                            let _ = emit_app.emit("status_changed", event);
+                        }
+                    },
+                ));
+            }
+
             // The generic-tier trigger: a debounced file watcher on the workspace. Only for
             // agents that do NOT emit cooperative signals (D37). The `.git/`-filtered callback
             // runs the SAME shared pipeline (WU-8.0: exclude git's own index churn to avoid a
@@ -766,6 +792,7 @@ pub async fn spawn_session(
                 state_file_path: state_file,
                 spec_poll_shutdown: Some(spec_shutdown_tx),
                 diff_poll_shutdown: Some(diff_shutdown_tx),
+                approval_poll_shutdown: Some(approval_shutdown_tx),
                 diff_watch_guard,
             };
             ptys.0

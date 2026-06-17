@@ -56,6 +56,12 @@ pub struct PtyState {
     /// Watches `spectty/{id}/diff`; sending `true` stops the Tokio task at the next tick.
     /// `None` for raw `pty_spawn` PTYs. Fired by [`shutdown`](Self::shutdown).
     pub diff_poll_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// Shutdown sender for this session's approval-surfacing poll loop (M4 WU-10.11, D29/D31).
+    /// Watches `spectty/{id}/approval`; on a pending request it emits `status_changed`
+    /// (`AwaitingInput` + quick_actions from the request options). Sending `true` stops the
+    /// Tokio task at the next tick. `None` for raw `pty_spawn` PTYs. Fired by
+    /// [`shutdown`](Self::shutdown).
+    pub approval_poll_shutdown: Option<tokio::sync::watch::Sender<bool>>,
     /// The generic-tier file watcher guard (M4 WU-8, D35/D37). Dropping it stops the
     /// `NotifyFileWatcher` thread cleanly (bounded join, no leak). `None` for cooperative
     /// agents (which use the `spectty_diff` trigger instead) and raw `pty_spawn` PTYs.
@@ -83,6 +89,10 @@ impl PtyState {
         }
         // Stop the cooperative diff-trigger poll loop (M4 WU-8).
         if let Some(tx) = &self.diff_poll_shutdown {
+            let _ = tx.send(true);
+        }
+        // Stop the approval-surfacing poll loop (M4 WU-10.11).
+        if let Some(tx) = &self.approval_poll_shutdown {
             let _ = tx.send(true);
         }
         // Drop the generic-tier file watcher: its `Drop` joins the debounce thread cleanly
