@@ -1,6 +1,7 @@
 # Capability: agent-runner
 
 > Living baseline spec. Established by change `M2-spawn-agent-provisioner` (archived 2026-06-08).
+> Confirmed by change `M4-triad-spec-vibelens` (archived 2026-06-17) — W1 doc-only correction verified baseline correctness.
 > RFC 2119 keywords (MUST, MUST NOT, SHALL, SHOULD, MAY) are normative.
 
 The `AgentRunner` port (Core trait) abstracts every supported AI CLI agent behind ONE
