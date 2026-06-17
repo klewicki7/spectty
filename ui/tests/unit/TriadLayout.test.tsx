@@ -12,7 +12,9 @@ vi.mock("../../src/session/ipc", async () => {
     ...actual,
     listenSpecUpdated: vi.fn().mockResolvedValue(() => {}),
     listenDiffUpdated: vi.fn().mockResolvedValue(() => {}),
+    listenStatusChanged: vi.fn().mockResolvedValue(() => {}),
     getSpec: vi.fn().mockResolvedValue(null),
+    getApproval: vi.fn().mockResolvedValue(null),
     getDiffExplanation: vi.fn().mockResolvedValue(null),
   };
 });
